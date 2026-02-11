@@ -27,6 +27,8 @@ export const ConnectionSection = (): React.JSX.Element => {
   const testConnection = useStore((s) => s.testConnection);
   const sshConfigHosts = useStore((s) => s.sshConfigHosts);
   const fetchSshConfigHosts = useStore((s) => s.fetchSshConfigHosts);
+  const lastSshConfig = useStore((s) => s.lastSshConfig);
+  const loadLastConnection = useStore((s) => s.loadLastConnection);
 
   // Form state
   const [host, setHost] = useState('');
@@ -43,10 +45,29 @@ export const ConnectionSection = (): React.JSX.Element => {
   const hostInputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Fetch SSH config hosts on mount
+  // Fetch SSH config hosts and load last connection on mount
   useEffect(() => {
     void fetchSshConfigHosts();
-  }, [fetchSshConfigHosts]);
+    void loadLastConnection();
+  }, [fetchSshConfigHosts, loadLastConnection]);
+
+  // Pre-fill form from saved connection config when it arrives (one-time on mount).
+  // setState in effect is intentional: lastSshConfig loads async from IPC, so we can't
+  // use it as useState initializers.
+  const prefilled = useRef(false);
+  useEffect(() => {
+    if (lastSshConfig && connectionState !== 'connected' && !prefilled.current) {
+      prefilled.current = true;
+      setHost(lastSshConfig.host);
+      setPort(String(lastSshConfig.port));
+      setUsername(lastSshConfig.username);
+      setAuthMethod(lastSshConfig.authMethod);
+      if (lastSshConfig.privateKeyPath) {
+        setPrivateKeyPath(lastSshConfig.privateKeyPath);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time prefill when async data arrives
+  }, [lastSshConfig]);
 
   // Close dropdown on outside click
   useEffect(() => {

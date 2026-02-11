@@ -207,6 +207,17 @@ export interface SshConnectionStatus {
 /**
  * SSH API exposed via preload.
  */
+/**
+ * Saved SSH connection config (no password).
+ */
+export interface SshLastConnection {
+  host: string;
+  port: number;
+  username: string;
+  authMethod: SshAuthMethod;
+  privateKeyPath?: string;
+}
+
 export interface SshAPI {
   connect: (config: SshConnectionConfig) => Promise<SshConnectionStatus>;
   disconnect: () => Promise<SshConnectionStatus>;
@@ -214,6 +225,8 @@ export interface SshAPI {
   test: (config: SshConnectionConfig) => Promise<{ success: boolean; error?: string }>;
   getConfigHosts: () => Promise<SshConfigHostEntry[]>;
   resolveHost: (alias: string) => Promise<SshConfigHostEntry | null>;
+  saveLastConnection: (config: SshLastConnection) => Promise<void>;
+  getLastConnection: () => Promise<SshLastConnection | null>;
   onStatus: (callback: (event: unknown, status: SshConnectionStatus) => void) => () => void;
 }
 

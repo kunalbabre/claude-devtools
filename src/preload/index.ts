@@ -5,8 +5,10 @@ import {
   SSH_CONNECT,
   SSH_DISCONNECT,
   SSH_GET_CONFIG_HOSTS,
+  SSH_GET_LAST_CONNECTION,
   SSH_GET_STATE,
   SSH_RESOLVE_HOST,
+  SSH_SAVE_LAST_CONNECTION,
   SSH_STATUS,
   SSH_TEST,
   UPDATER_CHECK,
@@ -42,6 +44,7 @@ import type {
   SshConfigHostEntry,
   SshConnectionConfig,
   SshConnectionStatus,
+  SshLastConnection,
   TriggerTestResult,
 } from '@shared/types';
 
@@ -340,6 +343,12 @@ const electronAPI: ElectronAPI = {
     },
     resolveHost: async (alias: string): Promise<SshConfigHostEntry | null> => {
       return invokeIpcWithResult<SshConfigHostEntry | null>(SSH_RESOLVE_HOST, alias);
+    },
+    saveLastConnection: async (config: SshLastConnection): Promise<void> => {
+      return invokeIpcWithResult<void>(SSH_SAVE_LAST_CONNECTION, config);
+    },
+    getLastConnection: async (): Promise<SshLastConnection | null> => {
+      return invokeIpcWithResult<SshLastConnection | null>(SSH_GET_LAST_CONNECTION);
     },
     onStatus: (callback: (event: unknown, status: SshConnectionStatus) => void): (() => void) => {
       ipcRenderer.on(

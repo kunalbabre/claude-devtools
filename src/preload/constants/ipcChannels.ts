@@ -81,6 +81,12 @@ export const SSH_GET_CONFIG_HOSTS = 'ssh:getConfigHosts';
 /** Resolve a single SSH config host alias */
 export const SSH_RESOLVE_HOST = 'ssh:resolveHost';
 
+/** Save last SSH connection config */
+export const SSH_SAVE_LAST_CONNECTION = 'ssh:saveLastConnection';
+
+/** Get last saved SSH connection config */
+export const SSH_GET_LAST_CONNECTION = 'ssh:getLastConnection';
+
 /** SSH status event channel (main -> renderer) */
 export const SSH_STATUS = 'ssh:status';
 

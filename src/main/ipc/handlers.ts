@@ -96,6 +96,25 @@ export function initializeIpcHandlers(
 }
 
 /**
+ * Re-initializes service-dependent IPC handlers after a mode switch (local ↔ SSH).
+ * This updates the module-level service references held by each domain handler module,
+ * ensuring IPC calls after the switch use the new service instances.
+ */
+export function reinitializeServiceHandlers(
+  scanner: ProjectScanner,
+  parser: SessionParser,
+  resolver: SubagentResolver,
+  builder: ChunkBuilder,
+  cache: DataCache
+): void {
+  initializeProjectHandlers(scanner);
+  initializeSessionHandlers(scanner, parser, resolver, builder, cache);
+  initializeSearchHandlers(scanner);
+  initializeSubagentHandlers(builder, cache, parser, resolver);
+  logger.info('Service handlers re-initialized after mode switch');
+}
+
+/**
  * Removes all IPC handlers.
  * Should be called when shutting down.
  */

@@ -288,9 +288,11 @@ export function initializeNotificationListeners(): () => void {
           s.error
         );
 
-      // Re-fetch data when connection state changes to connected or disconnected
+      // Re-fetch all data when connection state changes to connected or disconnected
       if (s.state === 'connected' || s.state === 'disconnected') {
-        void useStore.getState().fetchProjects();
+        const store = useStore.getState();
+        void store.fetchProjects();
+        void store.fetchRepositoryGroups();
       }
     });
     if (typeof cleanup === 'function') {

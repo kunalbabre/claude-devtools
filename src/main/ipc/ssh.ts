@@ -12,17 +12,22 @@ import {
   SSH_CONNECT,
   SSH_DISCONNECT,
   SSH_GET_CONFIG_HOSTS,
+  SSH_GET_LAST_CONNECTION,
   SSH_GET_STATE,
   SSH_RESOLVE_HOST,
+  SSH_SAVE_LAST_CONNECTION,
   SSH_TEST,
 } from '@preload/constants/ipcChannels';
 import { createLogger } from '@shared/utils/logger';
+
+import { configManager } from '../services';
 
 import type {
   SshConnectionConfig,
   SshConnectionManager,
   SshConnectionStatus,
 } from '../services/infrastructure/SshConnectionManager';
+import type { SshLastConnection } from '@shared/types';
 import type { IpcMain } from 'electron';
 
 const logger = createLogger('IPC:ssh');
@@ -120,6 +125,36 @@ export function registerSshHandlers(ipcMain: IpcMain): void {
     }
   });
 
+  ipcMain.handle(SSH_SAVE_LAST_CONNECTION, async (_event, config: SshLastConnection) => {
+    try {
+      configManager.updateConfig('ssh', {
+        lastConnection: {
+          host: config.host,
+          port: config.port,
+          username: config.username,
+          authMethod: config.authMethod,
+          privateKeyPath: config.privateKeyPath,
+        },
+      });
+      return { success: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error('Failed to save SSH connection:', message);
+      return { success: false, error: message };
+    }
+  });
+
+  ipcMain.handle(SSH_GET_LAST_CONNECTION, async () => {
+    try {
+      const config = configManager.getConfig();
+      return { success: true, data: config.ssh.lastConnection };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error('Failed to get last SSH connection:', message);
+      return { success: true, data: null };
+    }
+  });
+
   logger.info('SSH handlers registered');
 }
 
@@ -130,4 +165,6 @@ export function removeSshHandlers(ipcMain: IpcMain): void {
   ipcMain.removeHandler(SSH_TEST);
   ipcMain.removeHandler(SSH_GET_CONFIG_HOSTS);
   ipcMain.removeHandler(SSH_RESOLVE_HOST);
+  ipcMain.removeHandler(SSH_SAVE_LAST_CONNECTION);
+  ipcMain.removeHandler(SSH_GET_LAST_CONNECTION);
 }

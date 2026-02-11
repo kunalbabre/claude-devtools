@@ -5,8 +5,15 @@
  * and provides actions for connecting/disconnecting.
  */
 
+import { getFullResetState } from '../utils/stateResetHelpers';
+
 import type { AppState } from '../types';
-import type { SshConfigHostEntry, SshConnectionConfig, SshConnectionState } from '@shared/types';
+import type {
+  SshConfigHostEntry,
+  SshConnectionConfig,
+  SshConnectionState,
+  SshLastConnection,
+} from '@shared/types';
 import type { StateCreator } from 'zustand';
 
 // =============================================================================
@@ -20,6 +27,7 @@ export interface ConnectionSlice {
   connectedHost: string | null;
   connectionError: string | null;
   sshConfigHosts: SshConfigHostEntry[];
+  lastSshConfig: SshLastConnection | null;
 
   // Actions
   connectSsh: (config: SshConnectionConfig) => Promise<void>;
@@ -32,6 +40,7 @@ export interface ConnectionSlice {
   ) => void;
   fetchSshConfigHosts: () => Promise<void>;
   resolveConfigHost: (alias: string) => Promise<SshConfigHostEntry | null>;
+  loadLastConnection: () => Promise<void>;
 }
 
 // =============================================================================
@@ -48,6 +57,7 @@ export const createConnectionSlice: StateCreator<AppState, [], [], ConnectionSli
   connectedHost: null,
   connectionError: null,
   sshConfigHosts: [],
+  lastSshConfig: null,
 
   // Actions
   connectSsh: async (config: SshConnectionConfig): Promise<void> => {
@@ -64,12 +74,26 @@ export const createConnectionSlice: StateCreator<AppState, [], [], ConnectionSli
         connectionState: status.state,
         connectedHost: status.host,
         connectionError: status.error,
+        // Clear stale local selections so dashboard shows fresh remote data
+        ...(status.state === 'connected' ? getFullResetState() : {}),
       });
 
-      // Re-fetch all data when connected
+      // Re-fetch all data and persist config when connected
       if (status.state === 'connected') {
         const state = get();
         void state.fetchProjects();
+        void state.fetchRepositoryGroups();
+
+        // Save connection config (without password) for form pre-fill on next launch
+        const saved: SshLastConnection = {
+          host: config.host,
+          port: config.port,
+          username: config.username,
+          authMethod: config.authMethod,
+          privateKeyPath: config.privateKeyPath,
+        };
+        set({ lastSshConfig: saved });
+        void window.electronAPI.ssh.saveLastConnection(saved);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -88,11 +112,14 @@ export const createConnectionSlice: StateCreator<AppState, [], [], ConnectionSli
         connectionState: status.state,
         connectedHost: null,
         connectionError: null,
+        // Clear stale remote selections so dashboard shows fresh local data
+        ...getFullResetState(),
       });
 
       // Re-fetch local data
       const state = get();
       void state.fetchProjects();
+      void state.fetchRepositoryGroups();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       set({ connectionError: message });
@@ -138,6 +165,15 @@ export const createConnectionSlice: StateCreator<AppState, [], [], ConnectionSli
       return await window.electronAPI.ssh.resolveHost(alias);
     } catch {
       return null;
+    }
+  },
+
+  loadLastConnection: async (): Promise<void> => {
+    try {
+      const saved = await window.electronAPI.ssh.getLastConnection();
+      set({ lastSshConfig: saved });
+    } catch {
+      // Gracefully ignore - no saved connection
     }
   },
 });

@@ -190,11 +190,23 @@ export interface SessionsConfig {
   pinnedSessions: Record<string, { sessionId: string; pinnedAt: number }[]>;
 }
 
+export interface SshPersistConfig {
+  lastConnection: {
+    host: string;
+    port: number;
+    username: string;
+    authMethod: 'password' | 'privateKey' | 'agent' | 'auto';
+    privateKeyPath?: string;
+  } | null;
+  autoReconnect: boolean;
+}
+
 export interface AppConfig {
   notifications: NotificationConfig;
   general: GeneralConfig;
   display: DisplayConfig;
   sessions: SessionsConfig;
+  ssh: SshPersistConfig;
 }
 
 // Config section keys for type-safe updates
@@ -231,6 +243,10 @@ const DEFAULT_CONFIG: AppConfig = {
   },
   sessions: {
     pinnedSessions: {},
+  },
+  ssh: {
+    lastConnection: null,
+    autoReconnect: false,
   },
 };
 
@@ -351,6 +367,10 @@ export class ConfigManager {
       sessions: {
         ...DEFAULT_CONFIG.sessions,
         ...(loaded.sessions ?? {}),
+      },
+      ssh: {
+        ...DEFAULT_CONFIG.ssh,
+        ...(loaded.ssh ?? {}),
       },
     };
   }

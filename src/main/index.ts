@@ -23,7 +23,11 @@ import { createLogger } from '@shared/utils/logger';
 import { app, BrowserWindow } from 'electron';
 import { join } from 'path';
 
-import { initializeIpcHandlers, removeIpcHandlers } from './ipc/handlers';
+import {
+  initializeIpcHandlers,
+  reinitializeServiceHandlers,
+  removeIpcHandlers,
+} from './ipc/handlers';
 
 // Icon path - works for both dev and production
 const getIconPath = (): string => {
@@ -107,6 +111,15 @@ function initializeServices(): void {
     projectScanner = new ProjectScanner(projectsDir, undefined, provider);
     sessionParser = new SessionParser(projectScanner);
     subagentResolver = new SubagentResolver(projectScanner);
+
+    // Re-initialize IPC handler service references so subsequent calls use new instances
+    reinitializeServiceHandlers(
+      projectScanner,
+      sessionParser,
+      subagentResolver,
+      chunkBuilder,
+      dataCache
+    );
 
     // Update file watcher provider
     fileWatcher.setFileSystemProvider(provider);
