@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-12)
 
 ## Current Position
 
-Phase: 2 of 4 (Service Infrastructure)
-Plan: 3 of 3
-Status: Phase 02 complete - ready for Phase 03
-Last activity: 2026-02-12 - Completed 02-03 (Context IPC and profile persistence)
+Phase: 3 of 4 (State Management)
+Plan: 1 of 1
+Status: Phase 03 complete - ready for Phase 04
+Last activity: 2026-02-12 - Completed 03-01 (Context snapshot and restore system)
 
-Progress: [████░░░░░░] 50.0% (2.0/4 phases)
+Progress: [███████░░░] 75.0% (3.0/4 phases)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
-- Average duration: 4 min
-- Total execution time: 0.27 hours
+- Total plans completed: 5
+- Average duration: 5 min
+- Total execution time: 0.52 hours
 
 **By Phase:**
 
@@ -29,10 +29,11 @@ Progress: [████░░░░░░] 50.0% (2.0/4 phases)
 |-------|-------|-------|----------|
 | 01 Provider Plumbing | 1 | 4 min | 4 min |
 | 02 Service Infrastructure | 3 | 12 min | 4 min |
+| 03 State Management | 1 | 7 min | 7 min |
 
 **Recent Trend:**
-- Last 5 plans: 4, 4, 6, 2
-- Trend: Decreasing (profile persistence was straightforward)
+- Last 5 plans: 4, 6, 2, 7
+- Trend: Stable (snapshot/restore complexity balanced by clear requirements)
 
 *Updated after each plan completion*
 
@@ -59,6 +60,10 @@ Recent decisions affecting current work:
 - Destroy existing SSH context on reconnection to same host (02-02)
 - [Phase 02-03]: SSH profiles stored in ConfigManager config.ssh.profiles for persistence
 - [Phase 02-03]: lastActiveContextId persisted in config for app restart restoration
+- [Phase 03-01]: 5-minute TTL for snapshot expiration (balances staleness vs utility)
+- [Phase 03-01]: Exclude all transient state from snapshots (loading flags, errors, Maps/Sets)
+- [Phase 03-01]: Validate restored tabs against fresh project/worktree data from target context
+- [Phase 03-01]: Full-screen overlay prevents stale data flash during context transitions
 
 ### Pending Todos
 
@@ -75,8 +80,8 @@ None yet.
 - EventEmitter listener cleanup must be bulletproof - memory leaks from orphaned listeners can consume 50-100MB per switch
 
 **Phase 3:**
-- Snapshot expiration strategy uses 5-minute TTL heuristic - may need tuning based on actual user switching patterns
-- Must validate restored tabs against current context (projectIds may not exist in different context)
+- ✓ RESOLVED: 5-minute TTL implemented with configurable version checking (03-01)
+- ✓ RESOLVED: Snapshot validation filters invalid tabs and ensures at-least-one-pane invariant (03-01)
 
 **Phase 4:**
 - Context switcher placement in sidebar needs to fit with existing SidebarHeader without disrupting current layout
@@ -84,9 +89,9 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-12
-Stopped at: Completed 02-03 (Context IPC and profile persistence) — Phase 02 complete
+Stopped at: Completed 03-01 (Context snapshot and restore system) — Phase 03 complete
 Resume file: None
 
 ---
 *Created: 2026-02-12*
-*Last updated: 2026-02-12 after completing 02-03-PLAN.md*
+*Last updated: 2026-02-12 after completing 03-01-PLAN.md*
