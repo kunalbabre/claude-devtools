@@ -114,7 +114,13 @@ claude-devtools detects these compaction boundaries, measures the token delta be
 
 <video src="https://github.com/user-attachments/assets/3b07b3b4-57af-49ed-9539-be7c56a244f5" controls="controls" muted="muted" style="max-width: 100%;"></video>
 
-Define rules for when you want to receive **system notifications**. Match on regex patterns, assign colors, and filter your inbox by trigger. Built-in triggers catch common errors out of the box; add your own for project-specific patterns.
+Define rules for when you want to receive **system notifications**. Match on regex patterns, assign colors, and filter your inbox by trigger.
+
+- **Built-in defaults**: `.env File Access Alert`, `Tool Result Error` (`is_error: true`), and `High Token Usage` (default: 8,000 total tokens).
+- **Custom matching**: use regex against specific fields like `file_path`, `command`, `prompt`, `content`, `thinking`, or `text`.
+- **Sensitive-file monitoring**: create alerts for `.env`, `secrets`, payment/billing/stripe paths, or any project-specific pattern.
+- **Noise control**: choose input/output/total token thresholds, add ignore patterns, and scope triggers to selected repositories.
+
 
 ### :hammer_and_wrench: Rich Tool Call Inspector
 
@@ -148,6 +154,15 @@ claude-devtools parses your `~/.ssh/config` for host aliases, supports agent for
 
 Open multiple sessions side-by-side. Drag-and-drop tabs between panes, split views, and compare sessions in parallel — like a proper IDE for your AI conversations.
 
+### :hammer_and_wrench: Rich Tool Call Inspector
+
+Every tool call is paired with its result in an expandable card. Specialized viewers render each tool natively:
+- **Read** calls show syntax-highlighted code with line numbers
+- **Edit** calls show inline diffs with added/removed highlighting
+- **Bash** calls show command output
+- **Subagent** calls show the full execution tree, expandable in-place
+
+
 ---
 
 ## What the CLI Hides vs. What claude-devtools Shows
@@ -160,6 +175,7 @@ Open multiple sessions side-by-side. Drag-and-drop tabs between panes, split vie
 | A three-segment context bar | Per-turn token attribution across 7 categories — CLAUDE.md breakdown, skills, @-mentions, tool I/O, thinking, teams, user text — with compaction visualization showing how context fills, compresses, and refills |
 | Subagent output interleaved with the main thread | Isolated execution trees per agent, expandable inline with their own metrics |
 | Teammate messages buried in session logs | Color-coded teammate cards with name, message, and full team lifecycle visibility |
+| Critical events mixed into normal output | Trigger-filtered notification inbox for `.env` access, payment-related file paths, execution errors, and high token usage |
 | `--verbose` JSON dump | Structured, filterable, navigable interface — no noise |
 
 ---
