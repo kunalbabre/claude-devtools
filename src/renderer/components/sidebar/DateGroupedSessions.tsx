@@ -35,6 +35,7 @@ import type { DateCategory } from '@renderer/types/tabs';
 // Virtual list item types
 type VirtualItem =
   | { type: 'header'; category: DateCategory; id: string }
+  | { type: 'live-header'; id: string }
   | { type: 'pinned-header'; id: string }
   | { type: 'session'; session: Session; isPinned: boolean; isHidden: boolean; id: string }
   | { type: 'loader'; id: string };
@@ -54,6 +55,7 @@ export const DateGroupedSessions = (): React.JSX.Element => {
   const {
     sessions,
     selectedSessionId,
+    sessionDetail,
     selectedProjectId,
     sessionsLoading,
     sessionsError,
@@ -78,6 +80,7 @@ export const DateGroupedSessions = (): React.JSX.Element => {
     useShallow((s) => ({
       sessions: s.sessions,
       selectedSessionId: s.selectedSessionId,
+      sessionDetail: s.sessionDetail,
       selectedProjectId: s.selectedProjectId,
       sessionsLoading: s.sessionsLoading,
       sessionsError: s.sessionsError,
@@ -114,14 +117,37 @@ export const DateGroupedSessions = (): React.JSX.Element => {
     return sessions.filter((s) => !hiddenSet.has(s.id));
   }, [sessions, hiddenSet, showHiddenSessions]);
 
+  const isSessionLive = useCallback(
+    (session: Session): boolean => {
+      if (session.isOngoing) {
+        return true;
+      }
+      return (
+        session.id === selectedSessionId &&
+        sessionDetail?.session.id === selectedSessionId &&
+        sessionDetail?.session.isOngoing === true
+      );
+    },
+    [selectedSessionId, sessionDetail]
+  );
+
   // Separate pinned sessions from unpinned
   const { pinned: pinnedSessions, unpinned: unpinnedSessions } = useMemo(
     () => separatePinnedSessions(visibleSessions, pinnedSessionIds),
     [visibleSessions, pinnedSessionIds]
   );
 
+  // Keep live (ongoing) sessions at the top of the unpinned list
+  const { live: liveSessions, normal: normalSessions } = useMemo(
+    () => ({
+      live: unpinnedSessions.filter((session) => isSessionLive(session)),
+      normal: unpinnedSessions.filter((session) => !isSessionLive(session)),
+    }),
+    [unpinnedSessions, isSessionLive]
+  );
+
   // Group only unpinned sessions by date
-  const groupedSessions = useMemo(() => groupSessionsByDate(unpinnedSessions), [unpinnedSessions]);
+  const groupedSessions = useMemo(() => groupSessionsByDate(normalSessions), [normalSessions]);
 
   // Get non-empty categories in display order
   const nonEmptyCategories = useMemo(
@@ -153,7 +179,26 @@ export const DateGroupedSessions = (): React.JSX.Element => {
         });
       }
     } else {
-      // Default: date-grouped view with pinned section
+      // Default: date-grouped view with live + pinned sections
+
+      // Add live sessions first
+      if (liveSessions.length > 0) {
+        items.push({
+          type: 'live-header',
+          id: 'header-live',
+        });
+
+        for (const session of liveSessions) {
+          items.push({
+            type: 'session',
+            session,
+            isPinned: false,
+            isHidden: hiddenSet.has(session.id),
+            id: `session-${session.id}`,
+          });
+        }
+      }
+
       if (pinnedSessions.length > 0) {
         items.push({
           type: 'pinned-header',
@@ -204,6 +249,7 @@ export const DateGroupedSessions = (): React.JSX.Element => {
     contextSortedSessions,
     pinnedSessionIds,
     hiddenSet,
+    liveSessions,
     pinnedSessions,
     nonEmptyCategories,
     groupedSessions,
@@ -543,6 +589,18 @@ export const DateGroupedSessions = (): React.JSX.Element => {
                     <Pin className="size-3" />
                     Pinned
                   </div>
+                ) : item.type === 'live-header' ? (
+                  <div
+                    className="sticky top-0 flex h-full items-center border-t px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider backdrop-blur-sm"
+                    style={{
+                      backgroundColor:
+                        'color-mix(in srgb, var(--color-surface-sidebar) 95%, transparent)',
+                      color: 'var(--color-text-muted)',
+                      borderColor: 'var(--color-border-emphasis)',
+                    }}
+                  >
+                    Live
+                  </div>
                 ) : item.type === 'header' ? (
                   <div
                     className="sticky top-0 flex h-full items-center border-t px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider backdrop-blur-sm"
@@ -572,6 +630,7 @@ export const DateGroupedSessions = (): React.JSX.Element => {
                 ) : (
                   <SessionItem
                     session={item.session}
+                    isLive={isSessionLive(item.session)}
                     isActive={selectedSessionId === item.session.id}
                     isPinned={item.isPinned}
                     isHidden={item.isHidden}

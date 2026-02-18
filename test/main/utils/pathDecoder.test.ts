@@ -11,6 +11,7 @@ import {
   extractSessionId,
   getProjectsBasePath,
   getTodosBasePath,
+  isSessionFileName,
   isValidEncodedPath,
 } from '../../../src/main/utils/pathDecoder';
 
@@ -114,6 +115,10 @@ describe('pathDecoder', () => {
     it('should fall back to decoded name when cwdHint is undefined', () => {
       expect(extractProjectName('-Users-username-projectname')).toBe('projectname');
     });
+
+    it('should return basename for non-encoded project IDs', () => {
+      expect(extractProjectName('workspace-123')).toBe('workspace-123');
+    });
   });
 
   describe('isValidEncodedPath', () => {
@@ -176,6 +181,24 @@ describe('pathDecoder', () => {
 
     it('should handle empty string', () => {
       expect(extractSessionId('')).toBe('');
+    });
+
+    it('should extract session ID from JSON filename', () => {
+      expect(extractSessionId('copilot-session.json')).toBe('copilot-session');
+    });
+  });
+
+  describe('isSessionFileName', () => {
+    it('should detect jsonl session files', () => {
+      expect(isSessionFileName('session-1.jsonl')).toBe(true);
+    });
+
+    it('should detect json session files', () => {
+      expect(isSessionFileName('session-1.json')).toBe(true);
+    });
+
+    it('should reject non-session files', () => {
+      expect(isSessionFileName('readme.md')).toBe(false);
     });
   });
 

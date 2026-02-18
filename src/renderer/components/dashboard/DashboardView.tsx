@@ -16,7 +16,7 @@ import { useShallow } from 'zustand/react/shallow';
 
 const logger = createLogger('Component:DashboardView');
 import { formatDistanceToNow } from 'date-fns';
-import { Command, FolderGit2, FolderOpen, GitBranch, Search, Settings } from 'lucide-react';
+import { Command, FolderGit2, FolderOpen, GitBranch, Search, Settings, Sparkles } from 'lucide-react';
 
 import type { RepositoryGroup } from '@renderer/types/data';
 
@@ -162,8 +162,19 @@ const RepositoryCard = ({
       } `}
     >
       {/* Icon with subtle border */}
-      <div className="mb-3 flex size-8 items-center justify-center rounded-sm border border-border bg-surface-overlay transition-colors duration-300 group-hover:border-border-emphasis">
-        <FolderGit2 className="size-4 text-text-secondary transition-colors group-hover:text-text" />
+      <div className="mb-3 flex items-center gap-2">
+        <div className="flex size-8 items-center justify-center rounded-sm border border-border bg-surface-overlay transition-colors duration-300 group-hover:border-border-emphasis">
+          {repo.source === 'copilot' ? (
+            <Sparkles className="size-4 text-purple-400 transition-colors group-hover:text-purple-300" />
+          ) : (
+            <FolderGit2 className="size-4 text-text-secondary transition-colors group-hover:text-text" />
+          )}
+        </div>
+        {repo.source === 'copilot' && (
+          <span className="rounded-full bg-purple-500/15 px-2 py-0.5 text-[9px] font-medium text-purple-400">
+            Copilot
+          </span>
+        )}
       </div>
 
       {/* Project name */}

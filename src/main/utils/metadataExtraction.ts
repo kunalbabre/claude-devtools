@@ -78,6 +78,8 @@ export async function extractFirstUserMessagePreview(
   });
 
   let commandFallback: { text: string; timestamp: string } | null = null;
+  let assistantFallback: { text: string; timestamp: string } | null = null;
+  let sessionFallback: { text: string; timestamp: string } | null = null;
   let linesRead = 0;
 
   try {
@@ -89,28 +91,90 @@ export async function extractFirstUserMessagePreview(
       const trimmed = line.trim();
       if (!trimmed) continue;
 
-      let entry: ChatHistoryEntry;
+      let raw: Record<string, unknown>;
       try {
-        entry = JSON.parse(trimmed) as ChatHistoryEntry;
+        raw = JSON.parse(trimmed) as Record<string, unknown>;
       } catch {
         continue;
       }
 
-      if (entry.type !== 'user') {
+      // Handle Copilot event format: {type: "user.message", data: {content: "..."}}
+      if (typeof raw.type === 'string' && (raw.type as string).includes('.')) {
+        const evtType = raw.type as string;
+        const data = raw.data as Record<string, unknown> | undefined;
+        const copilotTs = (typeof raw.timestamp === 'string' ? raw.timestamp : null)
+          ?? (data && typeof data.timestamp === 'string' ? data.timestamp : null)
+          ?? new Date().toISOString();
+
+        // Extract content from common fields
+        const copilotContent = data
+          ? (typeof data.content === 'string' ? data.content.trim() : null)
+            ?? (typeof data.text === 'string' ? data.text.trim() : null)
+            ?? (typeof data.message === 'string' ? data.message.trim() : null)
+            ?? (typeof data.prompt === 'string' ? data.prompt.trim() : null)
+          : null;
+
+        // User messages: user.message, user.request, user.prompt, etc.
+        if (evtType.startsWith('user.') && copilotContent && copilotContent.length > 0) {
+          return { text: copilotContent.substring(0, 500), timestamp: copilotTs };
+        }
+
+        // Assistant messages as fallback
+        if (evtType.startsWith('assistant.') && evtType !== 'assistant.message_delta'
+          && !assistantFallback && copilotContent && copilotContent.length > 0) {
+          assistantFallback = { text: copilotContent.substring(0, 500), timestamp: copilotTs };
+        }
+
+        // session.start: extract producer/title as session metadata fallback
+        if (evtType === 'session.start' && data && !sessionFallback) {
+          const title = typeof data.title === 'string' ? data.title : null;
+          const name = typeof data.name === 'string' ? data.name : null;
+          const producer = typeof data.producer === 'string' ? data.producer : null;
+          const sessionId = typeof data.sessionId === 'string' ? data.sessionId : null;
+          const label = title ?? name ?? (producer ? `${producer} session` : null)
+            ?? (sessionId ? `Session ${sessionId.substring(0, 8)}` : null);
+          if (label) {
+            sessionFallback = { text: label, timestamp: copilotTs };
+          }
+        }
+
         continue;
       }
 
-      const preview = extractPreviewFromUserEntry(entry);
-      if (!preview) {
-        continue;
-      }
+      const entry = raw as unknown as ChatHistoryEntry;
 
-      if (!preview.isCommand) {
-        return { text: preview.text, timestamp: preview.timestamp };
-      }
+      if (entry.type === 'user') {
+        const preview = extractPreviewFromUserEntry(entry);
+        if (!preview) {
+          continue;
+        }
 
-      if (!commandFallback) {
-        commandFallback = { text: preview.text, timestamp: preview.timestamp };
+        if (!preview.isCommand) {
+          return { text: preview.text, timestamp: preview.timestamp };
+        }
+
+        if (!commandFallback) {
+          commandFallback = { text: preview.text, timestamp: preview.timestamp };
+        }
+      } else if (entry.type === 'assistant' && !assistantFallback) {
+        // Fallback: extract first assistant text response as potential title
+        const content = entry.message?.content;
+        if (Array.isArray(content)) {
+          const textContent = content
+            .filter(isTextContent)
+            .map((b: { text: string }) => b.text)
+            .join(' ')
+            .trim();
+          if (textContent.length > 0) {
+            const sanitized = sanitizeDisplayContent(textContent);
+            if (sanitized.length > 0) {
+              assistantFallback = {
+                text: sanitized.substring(0, 500),
+                timestamp: entry.timestamp ?? new Date().toISOString(),
+              };
+            }
+          }
+        }
       }
     }
   } catch (error) {
@@ -121,7 +185,7 @@ export async function extractFirstUserMessagePreview(
     fileStream.destroy();
   }
 
-  return commandFallback;
+  return commandFallback ?? assistantFallback ?? sessionFallback;
 }
 
 function extractPreviewFromUserEntry(entry: UserEntry): MessagePreview | null {

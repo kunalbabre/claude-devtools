@@ -38,11 +38,13 @@ import {
   extractBaseDir,
   extractProjectName,
   extractSessionId,
+  getCopilotSessionsBasePath,
   getProjectsBasePath,
   getTodosBasePath,
-  isValidEncodedPath,
+  isSessionFileName,
 } from '@main/utils/pathDecoder';
 import { createLogger } from '@shared/utils/logger';
+import { existsSync } from 'fs';
 import * as path from 'path';
 
 import { LocalFileSystemProvider } from '../infrastructure/LocalFileSystemProvider';
@@ -61,6 +63,7 @@ const logger = createLogger('Discovery:ProjectScanner');
 export class ProjectScanner {
   private readonly projectsDir: string;
   private readonly todosDir: string;
+  private readonly copilotSessionsDir: string | null;
   private readonly contentPresenceCache = new Map<
     string,
     { mtimeMs: number; size: number; hasContent: boolean }
@@ -86,9 +89,10 @@ export class ProjectScanner {
   private readonly sessionSearcher: SessionSearcher;
   private readonly projectPathResolver: ProjectPathResolver;
 
-  constructor(projectsDir?: string, todosDir?: string, fsProvider?: FileSystemProvider) {
+  constructor(projectsDir?: string, todosDir?: string, fsProvider?: FileSystemProvider, copilotSessionsDir?: string | null) {
     this.projectsDir = projectsDir ?? getProjectsBasePath();
     this.todosDir = todosDir ?? getTodosBasePath();
+    this.copilotSessionsDir = copilotSessionsDir ?? getCopilotSessionsBasePath();
     this.fsProvider = fsProvider ?? new LocalFileSystemProvider();
 
     // Initialize delegated services
@@ -120,10 +124,9 @@ export class ProjectScanner {
 
       const entries = await this.fsProvider.readdir(this.projectsDir);
 
-      // Filter to only directories with valid encoding pattern
-      const projectDirs = entries.filter(
-        (entry) => entry.isDirectory() && isValidEncodedPath(entry.name)
-      );
+      // Filter to directories likely containing session data.
+      // Keep Claude-encoded IDs, and allow plain directory names for compatible providers.
+      const projectDirs = entries.filter((entry) => entry.isDirectory() && entry.name !== 'todos');
 
       // Process each project directory (may return multiple projects per dir)
       const projectArrays = await this.collectFulfilledInBatches(
@@ -134,6 +137,11 @@ export class ProjectScanner {
 
       // Flatten and sort by most recent
       const validProjects = projectArrays.flat();
+
+      // Also scan Copilot session-state directory if available
+      const copilotProjects = await this.scanCopilotSessions();
+      validProjects.push(...copilotProjects);
+
       validProjects.sort((a, b) => (b.mostRecentSession ?? 0) - (a.mostRecentSession ?? 0));
 
       if (this.fsProvider.type === 'ssh') {
@@ -145,6 +153,88 @@ export class ProjectScanner {
       return validProjects;
     } catch (error) {
       logger.error('Error scanning projects directory:', error);
+      return [];
+    }
+  }
+
+  // ===========================================================================
+  // Copilot Session Discovery
+  // ===========================================================================
+
+  /**
+   * Scans the Copilot session-state directory (~/.copilot/session-state/)
+   * and returns sessions as a synthetic "Copilot Sessions" project.
+   *
+   * Copilot stores sessions in two layouts:
+   * - Legacy: session-state/{sessionId}.jsonl  (flat file)
+   * - Current: session-state/{sessionId}/events.jsonl  (directory per session)
+   */
+  private async scanCopilotSessions(): Promise<Project[]> {
+    if (!this.copilotSessionsDir) {
+      return [];
+    }
+
+    try {
+      if (!(await this.fsProvider.exists(this.copilotSessionsDir))) {
+        return [];
+      }
+
+      const entries = await this.fsProvider.readdir(this.copilotSessionsDir);
+
+      let mostRecent = 0;
+      const sessionIds: string[] = [];
+
+      for (const entry of entries) {
+        if (entry.isFile() && isSessionFileName(entry.name)) {
+          // Legacy flat file: {sessionId}.jsonl
+          const filePath = path.join(this.copilotSessionsDir, entry.name);
+          try {
+            const stat = await this.fsProvider.stat(filePath);
+            if (stat.mtimeMs > mostRecent) {
+              mostRecent = stat.mtimeMs;
+            }
+          } catch {
+            // stat failed, still include the session
+          }
+          sessionIds.push(extractSessionId(entry.name));
+        } else if (entry.isDirectory()) {
+          // New directory layout: {sessionId}/events.jsonl
+          const eventsPath = path.join(this.copilotSessionsDir, entry.name, 'events.jsonl');
+          try {
+            if (await this.fsProvider.exists(eventsPath)) {
+              const stat = await this.fsProvider.stat(eventsPath);
+              if (stat.mtimeMs > mostRecent) {
+                mostRecent = stat.mtimeMs;
+              }
+              sessionIds.push(entry.name);
+            }
+          } catch {
+            // skip directories without events.jsonl
+          }
+        }
+      }
+
+      if (sessionIds.length === 0) {
+        return [];
+      }
+
+      const copilotProject: Project = {
+        id: '__copilot__',
+        path: this.copilotSessionsDir,
+        name: 'Copilot Sessions',
+        sessions: sessionIds,
+        createdAt: mostRecent,
+        mostRecentSession: mostRecent,
+        source: 'copilot',
+      };
+
+      logger.debug(
+        `Discovered ${sessionIds.length} Copilot session(s) in ${this.copilotSessionsDir}`
+      );
+
+      return [copilotProject];
+    } catch (error) {
+      logger.debug('No Copilot sessions found:', error);
       return [];
     }
   }
@@ -205,10 +295,7 @@ export class ProjectScanner {
       const projectPath = path.join(this.projectsDir, encodedName);
       const entries = await this.fsProvider.readdir(projectPath);
 
-      // Get session files (.jsonl at root level)
-      const sessionFiles = entries.filter(
-        (entry) => entry.isFile() && entry.name.endsWith('.jsonl')
-      );
+      const sessionFiles = entries.filter((entry) => entry.isFile() && isSessionFileName(entry.name));
 
       if (sessionFiles.length === 0) {
         return [];
@@ -364,8 +451,7 @@ export class ProjectScanner {
    * Handles composite IDs by scanning the base directory and finding the matching subproject.
    */
   async getProject(projectId: string): Promise<Project | null> {
-    const baseDir = extractBaseDir(projectId);
-    const projectPath = path.join(this.projectsDir, baseDir);
+    const projectPath = this.resolveProjectDir(projectId);
 
     if (!(await this.fsProvider.exists(projectPath))) {
       return null;
@@ -373,11 +459,11 @@ export class ProjectScanner {
 
     // For composite IDs, scan and find the matching subproject
     if (subprojectRegistry.isComposite(projectId)) {
-      const projects = await this.scanProject(baseDir);
+      const projects = await this.scanProject(projectPath);
       return projects.find((p) => p.id === projectId) ?? null;
     }
 
-    const projects = await this.scanProject(baseDir);
+    const projects = await this.scanProject(projectPath);
     return projects.find((p) => p.id === projectId) ?? projects[0] ?? null;
   }
 
@@ -389,39 +475,86 @@ export class ProjectScanner {
    * Lists all sessions for a given project with metadata.
    * Filters out sessions that contain only noise messages.
    */
+  /**
+   * Resolves session file entries for a project directory.
+   * For Copilot projects, also discovers sessions stored as {sessionId}/events.jsonl directories.
+   * Returns a list of pseudo-dirent objects with name (e.g., "abc.jsonl") and the actual file path.
+   */
+  private async resolveCopilotSessionEntries(
+    projectPath: string,
+    entries: FsDirent[]
+  ): Promise<Array<{ name: string; filePath: string }>> {
+    const result: Array<{ name: string; filePath: string }> = [];
+
+    for (const entry of entries) {
+      if (entry.isFile() && isSessionFileName(entry.name)) {
+        result.push({ name: entry.name, filePath: path.join(projectPath, entry.name) });
+      } else if (entry.isDirectory()) {
+        const eventsPath = path.join(projectPath, entry.name, 'events.jsonl');
+        try {
+          if (await this.fsProvider.exists(eventsPath)) {
+            // Present as "{sessionId}.jsonl" for consistent downstream handling
+            result.push({ name: `${entry.name}.jsonl`, filePath: eventsPath });
+          }
+        } catch {
+          // skip inaccessible directories
+        }
+      }
+    }
+
+    return result;
+  }
+
   async listSessions(projectId: string): Promise<Session[]> {
     try {
-      const baseDir = extractBaseDir(projectId);
-      const projectPath = path.join(this.projectsDir, baseDir);
+      const projectPath = this.resolveProjectDir(projectId);
       const sessionFilter = await this.getSessionFilterForProject(projectId);
-      const shouldFilterNoise = this.fsProvider.type !== 'ssh';
+      // Align noise filtering with WorktreeGrouper (dashboard): disabled by default.
+      // This prevents the mismatch where dashboard shows N sessions but clicking shows 0
+      // because all sessions are filtered as noise (e.g., sessions with only system commands).
+      const shouldFilterNoise = process.env.CLAUDE_DEVTOOLS_STRICT_SESSION_FILTER === '1';
       const metadataLevel: SessionMetadataLevel = this.fsProvider.type === 'ssh' ? 'light' : 'deep';
+      const applyNoiseFilter = shouldFilterNoise;
 
       if (!(await this.fsProvider.exists(projectPath))) {
         return [];
       }
 
       const entries = await this.fsProvider.readdir(projectPath);
-      let sessionFiles = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'));
+
+      // For Copilot projects, also check {sessionId}/events.jsonl directories
+      const isCopilot = projectId === '__copilot__';
+      let resolvedEntries: Array<{ name: string; filePath: string }>;
+      if (isCopilot) {
+        resolvedEntries = await this.resolveCopilotSessionEntries(projectPath, entries);
+      } else {
+        resolvedEntries = entries
+          .filter((entry) => entry.isFile() && isSessionFileName(entry.name))
+          .map((entry) => ({ name: entry.name, filePath: path.join(projectPath, entry.name) }));
+      }
 
       // Filter to only sessions belonging to this subproject
       if (sessionFilter) {
-        sessionFiles = sessionFiles.filter((f) => sessionFilter.has(extractSessionId(f.name)));
+        resolvedEntries = resolvedEntries.filter((f) =>
+          sessionFilter.has(extractSessionId(f.name))
+        );
       }
 
-      const sessionPaths = sessionFiles.map((file) => path.join(projectPath, file.name));
-      const decodedPath = await this.resolveProjectPathForId(projectId, sessionPaths);
+      const decodedPath = await this.resolveProjectPathForId(
+        projectId,
+        resolvedEntries.map((e) => e.filePath)
+      );
 
       const sessions = await Promise.all(
-        sessionFiles.map(async (file) => {
-          const sessionId = extractSessionId(file.name);
-          const filePath = path.join(projectPath, file.name);
-          const fileDetails = await this.resolveFileDetails(file, filePath);
-          const prefetchedMtimeMs = fileDetails.mtimeMs;
-          const prefetchedSize = fileDetails.size;
-          const prefetchedBirthtimeMs = fileDetails.birthtimeMs;
+        resolvedEntries.map(async (entry) => {
+          const sessionId = extractSessionId(entry.name);
+          const filePath = entry.filePath;
+          const stat = await this.fsProvider.stat(filePath).catch(() => null);
+          const prefetchedMtimeMs = stat?.mtimeMs ?? 0;
+          const prefetchedSize = stat?.size ?? 0;
+          const prefetchedBirthtimeMs = stat?.birthtimeMs ?? 0;
 
-          if (shouldFilterNoise) {
+          if (applyNoiseFilter) {
             // Check if session has non-noise messages (delegated to SessionContentFilter)
             const hasContent = await this.hasDisplayableContent(
               filePath,
@@ -478,12 +611,15 @@ export class ProjectScanner {
     try {
       const includeTotalCount = options?.includeTotalCount ?? false;
       const prefilterAll = options?.prefilterAll ?? false;
-      const baseDir = extractBaseDir(projectId);
-      const projectPath = path.join(this.projectsDir, baseDir);
+      const projectPath = this.resolveProjectDir(projectId);
       const sessionFilter = await this.getSessionFilterForProject(projectId);
-      const shouldFilterNoise = this.fsProvider.type !== 'ssh';
+      // Align noise filtering with WorktreeGrouper (dashboard): disabled by default.
+      // This prevents the mismatch where dashboard shows N sessions but clicking shows 0
+      // because all sessions are filtered as noise (e.g., sessions with only system commands).
+      const shouldFilterNoise = process.env.CLAUDE_DEVTOOLS_STRICT_SESSION_FILTER === '1';
       const metadataLevel: SessionMetadataLevel =
         options?.metadataLevel ?? (this.fsProvider.type === 'ssh' ? 'light' : 'deep');
+      const applyNoiseFilterPaginated = shouldFilterNoise;
 
       if (!(await this.fsProvider.exists(projectPath))) {
         return { sessions: [], nextCursor: null, hasMore: false, totalCount: 0 };
@@ -491,11 +627,23 @@ export class ProjectScanner {
 
       // Step 1: Get all session files with their timestamps (lightweight stat calls)
       const entries = await this.fsProvider.readdir(projectPath);
-      let sessionFiles = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'));
+      const isCopilot = projectId === '__copilot__';
+
+      // For Copilot projects, also check {sessionId}/events.jsonl directories
+      let resolvedEntries: Array<{ name: string; filePath: string }>;
+      if (isCopilot) {
+        resolvedEntries = await this.resolveCopilotSessionEntries(projectPath, entries);
+      } else {
+        resolvedEntries = entries
+          .filter((entry) => entry.isFile() && isSessionFileName(entry.name))
+          .map((entry) => ({ name: entry.name, filePath: path.join(projectPath, entry.name) }));
+      }
 
       // Filter to only sessions belonging to this subproject
       if (sessionFilter) {
-        sessionFiles = sessionFiles.filter((f) => sessionFilter.has(extractSessionId(f.name)));
+        resolvedEntries = resolvedEntries.filter((f) =>
+          sessionFilter.has(extractSessionId(f.name))
+        );
       }
 
       // Get stats for all session files (parallel for SSH performance)
@@ -510,19 +658,18 @@ export class ProjectScanner {
       }
 
       const fileInfos = await this.collectFulfilledInBatches(
-        sessionFiles,
+        resolvedEntries,
         this.fsProvider.type === 'ssh' ? 48 : 200,
-        async (file) => {
-          const filePath = path.join(projectPath, file.name);
-          const fileDetails = await this.resolveFileDetails(file, filePath);
+        async (entry) => {
+          const stat = await this.fsProvider.stat(entry.filePath).catch(() => null);
           return {
-            name: file.name,
-            sessionId: extractSessionId(file.name),
-            timestamp: fileDetails.mtimeMs,
-            filePath,
-            mtimeMs: fileDetails.mtimeMs,
-            size: fileDetails.size,
-            birthtimeMs: fileDetails.birthtimeMs,
+            name: entry.name,
+            sessionId: extractSessionId(entry.name),
+            timestamp: stat?.mtimeMs ?? 0,
+            filePath: entry.filePath,
+            mtimeMs: stat?.mtimeMs ?? 0,
+            size: stat?.size ?? 0,
+            birthtimeMs: stat?.birthtimeMs ?? 0,
           } satisfies SessionFileInfo;
         }
       );
@@ -540,7 +687,7 @@ export class ProjectScanner {
       // This is slower but provides exact totalCount.
       let validSessionIds: Set<string> | null = null;
       let totalCount = 0;
-      if (prefilterAll && shouldFilterNoise && metadataLevel === 'deep') {
+      if (prefilterAll && applyNoiseFilterPaginated && metadataLevel === 'deep') {
         const contentResults = await Promise.allSettled(
           fileInfos.map(async (fileInfo) => ({
             sessionId: fileInfo.sessionId,
@@ -608,7 +755,7 @@ export class ProjectScanner {
             fileInfo,
             hasContent: validSessionIds.has(fileInfo.sessionId),
           }));
-        } else if (!shouldFilterNoise) {
+        } else if (!applyNoiseFilterPaginated) {
           contentBatch = batch.map((fileInfo) => ({ fileInfo, hasContent: true }));
         } else {
           const contentResults = await Promise.allSettled(
@@ -831,8 +978,10 @@ export class ProjectScanner {
     prefetchedSize?: number,
     prefetchedBirthtimeMs?: number
   ): Promise<Session> {
+    const source = projectId === '__copilot__' ? 'copilot' as const : undefined;
+
     if (metadataLevel === 'light') {
-      return this.buildLightSessionMetadata(
+      const session = await this.buildLightSessionMetadata(
         projectId,
         sessionId,
         filePath,
@@ -841,10 +990,12 @@ export class ProjectScanner {
         prefetchedSize,
         prefetchedBirthtimeMs
       );
+      if (source) session.source = source;
+      return session;
     }
 
     try {
-      return await this.buildSessionMetadata(
+      const session = await this.buildSessionMetadata(
         projectId,
         sessionId,
         filePath,
@@ -853,6 +1004,8 @@ export class ProjectScanner {
         prefetchedSize,
         prefetchedBirthtimeMs
       );
+      if (source) session.source = source;
+      return session;
     } catch (error) {
       // In SSH mode, never drop a visible session row due to transient deep-parse failures.
       if (this.fsProvider.type !== 'ssh') {
@@ -860,7 +1013,7 @@ export class ProjectScanner {
       }
 
       logger.debug(`SSH metadata parse failed for ${sessionId}, using light fallback`, error);
-      return this.buildLightSessionMetadata(
+      const session = await this.buildLightSessionMetadata(
         projectId,
         sessionId,
         filePath,
@@ -869,6 +1022,8 @@ export class ProjectScanner {
         prefetchedSize,
         prefetchedBirthtimeMs
       );
+      if (source) session.source = source;
+      return session;
     }
   }
 
@@ -876,9 +1031,9 @@ export class ProjectScanner {
    * Gets a single session's metadata.
    */
   async getSession(projectId: string, sessionId: string): Promise<Session | null> {
-    const filePath = this.getSessionPath(projectId, sessionId);
+    const filePath = await this.resolveSessionPath(projectId, sessionId);
 
-    if (!(await this.fsProvider.exists(filePath))) {
+    if (!filePath || !(await this.fsProvider.exists(filePath))) {
       return null;
     }
 
@@ -895,9 +1050,9 @@ export class ProjectScanner {
     sessionId: string,
     options?: SessionsByIdsOptions
   ): Promise<Session | null> {
-    const filePath = this.getSessionPath(projectId, sessionId);
+    const filePath = await this.resolveSessionPath(projectId, sessionId);
 
-    if (!(await this.fsProvider.exists(filePath))) {
+    if (!filePath || !(await this.fsProvider.exists(filePath))) {
       return null;
     }
 
@@ -937,9 +1092,54 @@ export class ProjectScanner {
 
   /**
    * Gets the path to the session JSONL file.
+   * For Copilot sessions, checks directory layout ({id}/events.jsonl) first,
+   * then falls back to legacy flat file ({id}.jsonl).
    */
   getSessionPath(projectId: string, sessionId: string): string {
+    if (projectId === '__copilot__' && this.copilotSessionsDir) {
+      // Prefer new directory layout: {sessionId}/events.jsonl
+      const dirEventsPath = path.join(this.copilotSessionsDir, sessionId, 'events.jsonl');
+      if (existsSync(dirEventsPath)) {
+        return dirEventsPath;
+      }
+      return path.join(this.copilotSessionsDir, `${sessionId}.jsonl`);
+    }
     return buildSessionPath(this.projectsDir, projectId, sessionId);
+  }
+
+  /**
+   * Resolves the directory path for a project, handling the special
+   * __copilot__ project ID which maps to the Copilot session-state directory.
+   */
+  private resolveProjectDir(projectId: string): string {
+    if (projectId === '__copilot__' && this.copilotSessionsDir) {
+      return this.copilotSessionsDir;
+    }
+    return path.join(this.projectsDir, extractBaseDir(projectId));
+  }
+
+  private async resolveSessionPath(projectId: string, sessionId: string): Promise<string | null> {
+    const projectPath = this.resolveProjectDir(projectId);
+
+    // For Copilot sessions, check directory layout first: {sessionId}/events.jsonl
+    if (projectId === '__copilot__') {
+      const dirEventsPath = path.join(projectPath, sessionId, 'events.jsonl');
+      if (await this.fsProvider.exists(dirEventsPath)) {
+        return dirEventsPath;
+      }
+    }
+
+    const jsonlPath = path.join(projectPath, `${sessionId}.jsonl`);
+    if (await this.fsProvider.exists(jsonlPath)) {
+      return jsonlPath;
+    }
+
+    const jsonPath = path.join(projectPath, `${sessionId}.json`);
+    if (await this.fsProvider.exists(jsonPath)) {
+      return jsonPath;
+    }
+
+    return null;
   }
 
   /**
@@ -951,11 +1151,11 @@ export class ProjectScanner {
 
   /**
    * Lists all session file paths for a project.
+   * For Copilot projects, also checks {sessionId}/events.jsonl directory layout.
    */
   async listSessionFiles(projectId: string): Promise<string[]> {
     try {
-      const baseDir = extractBaseDir(projectId);
-      const projectPath = path.join(this.projectsDir, baseDir);
+      const projectPath = this.resolveProjectDir(projectId);
       const sessionFilter = await this.getSessionFilterForProject(projectId);
 
       if (!(await this.fsProvider.exists(projectPath))) {
@@ -963,14 +1163,30 @@ export class ProjectScanner {
       }
 
       const entries = await this.fsProvider.readdir(projectPath);
+      const result: string[] = [];
 
-      let files = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'));
-
-      if (sessionFilter) {
-        files = files.filter((entry) => sessionFilter.has(extractSessionId(entry.name)));
+      for (const entry of entries) {
+        if (entry.isFile() && isSessionFileName(entry.name)) {
+          const sessionId = extractSessionId(entry.name);
+          if (!sessionFilter || sessionFilter.has(sessionId)) {
+            result.push(path.join(projectPath, entry.name));
+          }
+        } else if (projectId === '__copilot__' && entry.isDirectory()) {
+          // Copilot directory layout: {sessionId}/events.jsonl
+          const eventsPath = path.join(projectPath, entry.name, 'events.jsonl');
+          try {
+            if (await this.fsProvider.exists(eventsPath)) {
+              if (!sessionFilter || sessionFilter.has(entry.name)) {
+                result.push(eventsPath);
+              }
+            }
+          } catch {
+            // skip inaccessible directories
+          }
+        }
       }
 
-      return files.map((entry) => path.join(projectPath, entry.name));
+      return result;
     } catch (error) {
       logger.error(`Error listing session files for project ${projectId}:`, error);
       return [];

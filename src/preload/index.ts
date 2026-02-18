@@ -35,6 +35,7 @@ import {
   CONFIG_FIND_WSL_CLAUDE_ROOTS,
   CONFIG_GET,
   CONFIG_GET_CLAUDE_ROOT_INFO,
+  CONFIG_GET_COPILOT_ROOT_INFO,
   CONFIG_GET_TRIGGERS,
   CONFIG_HIDE_SESSION,
   CONFIG_HIDE_SESSIONS,
@@ -44,6 +45,7 @@ import {
   CONFIG_REMOVE_IGNORE_REPOSITORY,
   CONFIG_REMOVE_TRIGGER,
   CONFIG_SELECT_CLAUDE_ROOT_FOLDER,
+  CONFIG_SELECT_COPILOT_ROOT_FOLDER,
   CONFIG_SELECT_FOLDERS,
   CONFIG_SNOOZE,
   CONFIG_TEST_TRIGGER,
@@ -59,6 +61,8 @@ import type {
   ClaudeRootFolderSelection,
   ClaudeRootInfo,
   ContextInfo,
+  CopilotRootFolderSelection,
+  CopilotRootInfo,
   ElectronAPI,
   HttpServerStatus,
   NotificationTrigger,
@@ -283,6 +287,14 @@ const electronAPI: ElectronAPI = {
     },
     getClaudeRootInfo: async (): Promise<ClaudeRootInfo> => {
       return invokeIpcWithResult<ClaudeRootInfo>(CONFIG_GET_CLAUDE_ROOT_INFO);
+    },
+    selectCopilotRootFolder: async (): Promise<CopilotRootFolderSelection | null> => {
+      return invokeIpcWithResult<CopilotRootFolderSelection | null>(
+        CONFIG_SELECT_COPILOT_ROOT_FOLDER
+      );
+    },
+    getCopilotRootInfo: async (): Promise<CopilotRootInfo> => {
+      return invokeIpcWithResult<CopilotRootInfo>(CONFIG_GET_COPILOT_ROOT_INFO);
     },
     findWslClaudeRoots: async (): Promise<WslClaudeRootCandidate[]> => {
       return invokeIpcWithResult<WslClaudeRootCandidate[]>(CONFIG_FIND_WSL_CLAUDE_ROOTS);

@@ -262,6 +262,8 @@ export interface AppConfig {
     defaultTab: 'dashboard' | 'last-session';
     /** Optional custom Claude root folder (auto-detected when null) */
     claudeRootPath: string | null;
+    /** Optional custom Copilot session-state folder (auto-detected when null) */
+    copilotRootPath: string | null;
   };
   /** Display and UI settings */
   display: {

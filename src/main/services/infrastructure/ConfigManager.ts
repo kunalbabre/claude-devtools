@@ -9,7 +9,7 @@
  * - Handle JSON parse errors gracefully
  */
 
-import { setClaudeBasePathOverride } from '@main/utils/pathDecoder';
+import { setClaudeBasePathOverride, setCopilotBasePathOverride } from '@main/utils/pathDecoder';
 import { validateRegexPattern } from '@main/utils/regexValidation';
 import { createLogger } from '@shared/utils/logger';
 import * as fs from 'fs';
@@ -181,6 +181,7 @@ export interface GeneralConfig {
   theme: 'dark' | 'light' | 'system';
   defaultTab: 'dashboard' | 'last-session';
   claudeRootPath: string | null;
+  copilotRootPath: string | null;
 }
 
 export interface DisplayConfig {
@@ -248,6 +249,7 @@ const DEFAULT_CONFIG: AppConfig = {
     theme: 'dark',
     defaultTab: 'dashboard',
     claudeRootPath: null,
+    copilotRootPath: null,
   },
   display: {
     showTimestamps: true,
@@ -316,6 +318,7 @@ export class ConfigManager {
     this.configPath = configPath ?? DEFAULT_CONFIG_PATH;
     this.config = this.loadConfig();
     setClaudeBasePathOverride(this.config.general.claudeRootPath);
+    setCopilotBasePathOverride(this.config.general.copilotRootPath);
     this.triggerManager = new TriggerManager(this.config.notifications.triggers, () =>
       this.saveConfig()
     );
@@ -404,6 +407,7 @@ export class ConfigManager {
       ...(loaded.general ?? {}),
     };
     mergedGeneral.claudeRootPath = normalizeConfiguredClaudeRootPath(mergedGeneral.claudeRootPath);
+    mergedGeneral.copilotRootPath = normalizeConfiguredClaudeRootPath(mergedGeneral.copilotRootPath);
 
     // Merge triggers: preserve existing triggers, add missing builtin ones
     const mergedTriggers = TriggerManager.mergeTriggers(loadedTriggers, DEFAULT_TRIGGERS);
@@ -477,6 +481,7 @@ export class ConfigManager {
 
     if (section === 'general') {
       setClaudeBasePathOverride(this.config.general.claudeRootPath);
+      setCopilotBasePathOverride(this.config.general.copilotRootPath);
     }
 
     this.saveConfig();
@@ -491,15 +496,17 @@ export class ConfigManager {
       return data;
     }
 
-    if (!Object.prototype.hasOwnProperty.call(data, 'claudeRootPath')) {
-      return data;
+    const generalUpdate = data as Partial<GeneralConfig>;
+    const result = { ...generalUpdate };
+
+    if (Object.prototype.hasOwnProperty.call(data, 'claudeRootPath')) {
+      result.claudeRootPath = normalizeConfiguredClaudeRootPath(generalUpdate.claudeRootPath);
+    }
+    if (Object.prototype.hasOwnProperty.call(data, 'copilotRootPath')) {
+      result.copilotRootPath = normalizeConfiguredClaudeRootPath(generalUpdate.copilotRootPath);
     }
 
-    const generalUpdate = data as Partial<GeneralConfig>;
-    return {
-      ...generalUpdate,
-      claudeRootPath: normalizeConfiguredClaudeRootPath(generalUpdate.claudeRootPath),
-    } as unknown as Partial<AppConfig[K]>;
+    return result as unknown as Partial<AppConfig[K]>;
   }
 
   // ===========================================================================
@@ -913,6 +920,7 @@ export class ConfigManager {
   resetToDefaults(): AppConfig {
     this.config = this.deepClone(DEFAULT_CONFIG);
     setClaudeBasePathOverride(this.config.general.claudeRootPath);
+    setCopilotBasePathOverride(this.config.general.copilotRootPath);
     this.triggerManager.setTriggers(this.config.notifications.triggers);
     this.saveConfig();
     logger.info('Config reset to defaults');
@@ -927,6 +935,7 @@ export class ConfigManager {
   reload(): AppConfig {
     this.config = this.loadConfig();
     setClaudeBasePathOverride(this.config.general.claudeRootPath);
+    setCopilotBasePathOverride(this.config.general.copilotRootPath);
     this.triggerManager.setTriggers(this.config.notifications.triggers);
     logger.info('Config reloaded from disk');
     return this.getConfig();

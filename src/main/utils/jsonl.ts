@@ -9,6 +9,7 @@
 
 import { isCommandOutputContent, sanitizeDisplayContent } from '@shared/utils/contentSanitizer';
 import { createLogger } from '@shared/utils/logger';
+import * as crypto from 'crypto';
 import * as readline from 'readline';
 
 import { LocalFileSystemProvider } from '../services/infrastructure/LocalFileSystemProvider';
@@ -77,20 +78,526 @@ export async function parseJsonlFile(
     }
   }
 
-  return messages;
+  if (messages.length === 0 && filePath.toLowerCase().endsWith('.json')) {
+    return parseCopilotJsonFile(filePath, fsProvider);
+  }
+
+  return consolidateCopilotDeltas(messages);
 }
 
 /**
  * Parse a single JSONL line into a ParsedMessage.
  * Returns null for invalid/unsupported lines.
+ *
+ * Supports:
+ * - Claude Code format: { uuid, type, message, timestamp, ... }
+ * - Copilot simple format: { role, content, ... }
+ * - Copilot event format: { type: "user.message", data: { content, ... }, timestamp }
  */
 export function parseJsonlLine(line: string): ParsedMessage | null {
   if (!line.trim()) {
     return null;
   }
 
-  const entry = JSON.parse(line) as ChatHistoryEntry;
-  return parseChatHistoryEntry(entry);
+  const entry = JSON.parse(line) as unknown;
+  const claudeEntry = parseChatHistoryEntry(entry as ChatHistoryEntry);
+  if (claudeEntry) {
+    return claudeEntry;
+  }
+
+  // Try Copilot event format (Background Agent JSONL)
+  const copilotEvent = parseCopilotEventEntry(entry);
+  if (copilotEvent) {
+    return copilotEvent;
+  }
+
+  return parseCopilotMessageEntry(entry);
+}
+
+async function parseCopilotJsonFile(
+  filePath: string,
+  fsProvider: FileSystemProvider
+): Promise<ParsedMessage[]> {
+  try {
+    const raw = await fsProvider.readFile(filePath);
+    const data = JSON.parse(raw) as unknown;
+    return parseCopilotTranscript(data);
+  } catch (error) {
+    logger.debug(`Failed to parse JSON transcript at ${filePath}:`, error);
+    return [];
+  }
+}
+
+function parseCopilotTranscript(data: unknown): ParsedMessage[] {
+  if (!data || typeof data !== 'object') {
+    return [];
+  }
+
+  if (Array.isArray(data)) {
+    return parseCopilotMessageArray(data);
+  }
+
+  const obj = data as Record<string, unknown>;
+
+  if (Array.isArray(obj.messages)) {
+    return parseCopilotMessageArray(obj.messages);
+  }
+
+  if (Array.isArray(obj.requests)) {
+    return parseCopilotRequestArray(obj.requests);
+  }
+
+  if (Array.isArray(obj.turns)) {
+    return parseCopilotRequestArray(obj.turns);
+  }
+
+  const single = parseCopilotMessageEntry(obj);
+  return single ? [single] : [];
+}
+
+function parseCopilotMessageArray(items: unknown[]): ParsedMessage[] {
+  const messages = items
+    .map((item) => parseCopilotMessageEntry(item))
+    .filter((msg): msg is ParsedMessage => msg !== null);
+
+  return assignParentUuids(messages);
+}
+
+function parseCopilotRequestArray(items: unknown[]): ParsedMessage[] {
+  const messages: ParsedMessage[] = [];
+
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index];
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+
+    const request = item as Record<string, unknown>;
+    const userText =
+      asString(request.prompt) ??
+      asString(request.input) ??
+      asString(request.query) ??
+      asString(request.message) ??
+      asString((request.request as Record<string, unknown> | undefined)?.message);
+    const assistantText =
+      asString(request.response) ??
+      asString(request.answer) ??
+      asString(request.output) ??
+      asString((request.responseMessage as Record<string, unknown> | undefined)?.content);
+
+    const timestampRaw =
+      asString(request.timestamp) ??
+      asString(request.createdAt) ??
+      asString(request.time) ??
+      asString((request.request as Record<string, unknown> | undefined)?.timestamp);
+    const timestamp = toDateOrNow(timestampRaw);
+
+    if (userText && userText.trim().length > 0) {
+      messages.push(
+        buildCopilotMessage({
+          type: 'user',
+          content: userText,
+          timestamp,
+          uuidSeed: `copilot-user-${index}-${timestamp.toISOString()}`,
+          cwd: asString(request.cwd) ?? asString(request.workspacePath),
+        })
+      );
+    }
+
+    if (assistantText && assistantText.trim().length > 0) {
+      const assistantTs = toDateOrNow(
+        asString((request.responseMessage as Record<string, unknown> | undefined)?.timestamp) ??
+          timestamp.toISOString()
+      );
+      messages.push(
+        buildCopilotMessage({
+          type: 'assistant',
+          content: [{ type: 'text', text: assistantText }],
+          timestamp: assistantTs,
+          uuidSeed: `copilot-assistant-${index}-${assistantTs.toISOString()}`,
+          cwd: asString(request.cwd) ?? asString(request.workspacePath),
+          model:
+            asString(request.model) ??
+            asString((request.responseMessage as Record<string, unknown> | undefined)?.model),
+        })
+      );
+    }
+  }
+
+  messages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+  return assignParentUuids(messages);
+}
+
+function parseCopilotMessageEntry(entry: unknown): ParsedMessage | null {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+
+  const obj = entry as Record<string, unknown>;
+  const roleRaw =
+    asString(obj.role) ??
+    asString(obj.author) ??
+    asString(obj.type) ??
+    asString((obj.message as Record<string, unknown> | undefined)?.role);
+  const role = normalizeRole(roleRaw);
+  if (!role) {
+    return null;
+  }
+
+  const content = (
+    pickMessageContent(obj.content).value ??
+    pickMessageContent((obj.message as Record<string, unknown> | undefined)?.content).value ??
+    pickMessageContent(obj.text).value ??
+    pickMessageContent(obj.value).value
+  );
+  if (content === null) {
+    return null;
+  }
+
+  const timestampRaw =
+    asString(obj.timestamp) ??
+    asString(obj.createdAt) ??
+    asString(obj.time) ??
+    asString((obj.message as Record<string, unknown> | undefined)?.timestamp);
+
+  return buildCopilotMessage({
+    type: role,
+    content,
+    timestamp: toDateOrNow(timestampRaw),
+    uuidSeed:
+      asString(obj.uuid) ??
+      asString(obj.id) ??
+      `copilot-${role}-${asString(timestampRaw) ?? Date.now().toString()}`,
+    cwd: asString(obj.cwd) ?? asString(obj.workspacePath),
+    model:
+      asString(obj.model) ?? asString((obj.message as Record<string, unknown> | undefined)?.model),
+  });
+}
+
+function buildCopilotMessage(params: {
+  type: 'user' | 'assistant' | 'system';
+  content: string | ContentBlock[];
+  timestamp: Date;
+  uuidSeed: string;
+  cwd?: string;
+  model?: string;
+}): ParsedMessage {
+  const uuid = stableUuid(params.uuidSeed);
+  const isAssistant = params.type === 'assistant';
+
+  return {
+    uuid,
+    parentUuid: null,
+    type: params.type,
+    timestamp: params.timestamp,
+    role: params.type,
+    content: params.content,
+    usage: undefined,
+    model: isAssistant ? params.model : undefined,
+    cwd: params.cwd,
+    gitBranch: undefined,
+    agentId: undefined,
+    isSidechain: false,
+    isMeta: false,
+    userType: params.type === 'user' ? 'external' : undefined,
+    isCompactSummary: false,
+    toolCalls: extractToolCalls(params.content),
+    toolResults: extractToolResults(params.content),
+    sourceToolUseID: undefined,
+    sourceToolAssistantUUID: undefined,
+    toolUseResult: undefined,
+  };
+}
+
+// =============================================================================
+// Copilot Background Agent Event Format
+// =============================================================================
+
+/**
+ * Parse a Copilot Background Agent JSONL event line.
+ *
+ * Format: { type: "user.message" | "assistant.message" | "assistant.message_delta" |
+ *           "tool.execution_start" | "tool.execution_complete" | "session.start" |
+ *           "session.error" | "session.shutdown",
+ *           data: { ... },
+ *           timestamp: "...",
+ *           id?: "..." }
+ */
+function parseCopilotEventEntry(entry: unknown): ParsedMessage | null {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+
+  const obj = entry as Record<string, unknown>;
+  const eventType = asString(obj.type);
+
+  if (!eventType?.includes('.')) {
+    return null;
+  }
+
+  const data = obj.data as Record<string, unknown> | undefined;
+  if (!data || typeof data !== 'object') {
+    return null;
+  }
+
+  const timestampRaw = asString(obj.timestamp) ?? asString(data.timestamp);
+  const timestamp = toDateOrNow(timestampRaw);
+  const eventId = asString(obj.id) ?? asString(data.id) ?? '';
+
+  switch (eventType) {
+    case 'session.start': {
+      const sessionId = asString(data.sessionId) ?? '';
+      return buildCopilotMessage({
+        type: 'system',
+        content: `Session started (${sessionId})`,
+        timestamp,
+        uuidSeed: `copilot-event-${eventId}-session-start`,
+        cwd: asString(data.cwd) ?? asString(data.workingDirectory),
+      });
+    }
+
+    case 'user.message': {
+      const content = asString(data.content) ?? '';
+      if (!content.trim()) {
+        return null;
+      }
+      return buildCopilotMessage({
+        type: 'user',
+        content,
+        timestamp,
+        uuidSeed: `copilot-event-${eventId}-user`,
+        cwd: asString(data.cwd),
+      });
+    }
+
+    case 'assistant.message': {
+      const content = asString(data.content) ?? '';
+      if (!content.trim()) {
+        return null;
+      }
+      return buildCopilotMessage({
+        type: 'assistant',
+        content: [{ type: 'text', text: content }],
+        timestamp,
+        uuidSeed: `copilot-event-${eventId}-assistant-${asString(data.messageId) ?? ''}`,
+        model: asString(data.model),
+      });
+    }
+
+    case 'assistant.message_delta': {
+      // Deltas are typically aggregated by the consumer; emit as individual messages
+      // only when full assistant.message is not present
+      const deltaContent = asString(data.deltaContent) ?? '';
+      if (!deltaContent.trim()) {
+        return null;
+      }
+      return buildCopilotMessage({
+        type: 'assistant',
+        content: [{ type: 'text', text: deltaContent }],
+        timestamp,
+        uuidSeed: `copilot-event-${eventId}-delta-${asString(data.messageId) ?? ''}`,
+        model: asString(data.model),
+      });
+    }
+
+    case 'tool.execution_start': {
+      const toolName = asString(data.toolName) ?? asString(data.name) ?? 'unknown_tool';
+      const toolInput = data.input ?? data.parameters ?? {};
+      const toolCallId = asString(data.toolCallId) ?? eventId;
+      const contentBlocks: ContentBlock[] = [
+        {
+          type: 'tool_use',
+          id: toolCallId,
+          name: toolName,
+          input: toolInput as Record<string, unknown>,
+        },
+      ];
+      return buildCopilotMessage({
+        type: 'assistant',
+        content: contentBlocks,
+        timestamp,
+        uuidSeed: `copilot-event-${eventId}-tool-start-${toolCallId}`,
+      });
+    }
+
+    case 'tool.execution_complete': {
+      const toolCallId = asString(data.toolCallId) ?? eventId;
+      const resultContent = asString(data.output) ?? asString(data.content) ?? '';
+      const isError = data.isError === true || data.status === 'error';
+      const contentBlocks: ContentBlock[] = [
+        {
+          type: 'tool_result',
+          tool_use_id: toolCallId,
+          content: resultContent,
+          is_error: isError,
+        },
+      ];
+      return buildCopilotMessage({
+        type: 'user',
+        content: contentBlocks,
+        timestamp,
+        uuidSeed: `copilot-event-${eventId}-tool-complete-${toolCallId}`,
+      });
+    }
+
+    case 'session.error': {
+      const errorMsg = asString(data.message) ?? asString(data.error) ?? 'Unknown error';
+      const errorType = asString(data.errorType) ?? 'error';
+      return buildCopilotMessage({
+        type: 'system',
+        content: `Error (${errorType}): ${errorMsg}`,
+        timestamp,
+        uuidSeed: `copilot-event-${eventId}-error`,
+      });
+    }
+
+    case 'session.shutdown': {
+      return buildCopilotMessage({
+        type: 'system',
+        content: 'Session ended',
+        timestamp,
+        uuidSeed: `copilot-event-${eventId}-shutdown`,
+      });
+    }
+
+    default: {
+      // Generic fallback: handle any unknown event type with content
+      // e.g., user.request, agent.response, message.user, etc.
+      const genericContent = asString(data.content) ?? asString(data.text)
+        ?? asString(data.message) ?? asString(data.prompt);
+      if (genericContent && genericContent.trim().length > 0) {
+        // Determine role from the event type prefix
+        const prefix = eventType.split('.')[0].toLowerCase();
+        const role: 'user' | 'assistant' | 'system' =
+          prefix === 'user' ? 'user'
+          : (prefix === 'assistant' || prefix === 'agent') ? 'assistant'
+          : 'system';
+
+        if (role === 'assistant') {
+          return buildCopilotMessage({
+            type: 'assistant',
+            content: [{ type: 'text', text: genericContent.trim() }],
+            timestamp,
+            uuidSeed: `copilot-event-${eventId}-${eventType}`,
+            model: asString(data.model),
+          });
+        }
+        return buildCopilotMessage({
+          type: role,
+          content: genericContent.trim(),
+          timestamp,
+          uuidSeed: `copilot-event-${eventId}-${eventType}`,
+          cwd: asString(data.cwd) ?? asString(data.workingDirectory),
+        });
+      }
+      return null;
+    }
+  }
+}
+
+/**
+ * Consolidate assistant.message_delta events into single assistant messages.
+ * When a full assistant.message is present for a given messageId, deltas for
+ * that messageId are dropped. Otherwise deltas are merged into one message.
+ *
+ * This is a no-op for non-Copilot sessions (no delta messages present).
+ */
+function consolidateCopilotDeltas(messages: ParsedMessage[]): ParsedMessage[] {
+  // Quick check: if no messages look like Copilot events, return as-is
+  let hasCopilotEvents = false;
+  for (const msg of messages) {
+    if (msg.type === 'system' && typeof msg.content === 'string' && msg.content.startsWith('Session started')) {
+      hasCopilotEvents = true;
+      break;
+    }
+  }
+  if (!hasCopilotEvents) {
+    return messages;
+  }
+
+  // For Copilot event sessions, re-assign parent UUIDs for proper chaining
+  return assignParentUuids(messages);
+}
+
+function assignParentUuids(messages: ParsedMessage[]): ParsedMessage[] {
+  let previousUuid: string | null = null;
+  return messages.map((message) => {
+    const parentUuid = previousUuid;
+    previousUuid = message.uuid;
+    return {
+      ...message,
+      parentUuid,
+    };
+  });
+}
+
+function stableUuid(seed: string): string {
+  return crypto.createHash('sha256').update(seed).digest('hex').slice(0, 24); // NOSONAR
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+type CopilotRole = 'user' | 'assistant' | 'system';
+
+function normalizeRole(raw: string | undefined): CopilotRole | null {
+  if (!raw) {
+    return null;
+  }
+
+  const normalized = raw.toLowerCase();
+  if (normalized === 'user' || normalized === 'human') {
+    return 'user' as CopilotRole;
+  }
+  if (normalized === 'assistant' || normalized === 'ai' || normalized === 'copilot') {
+    return 'assistant' as CopilotRole;
+  }
+  if (normalized === 'system') {
+    return 'system' as CopilotRole;
+  }
+  return null;
+}
+
+type MessageContent = string | ContentBlock[];
+
+// sonarjs/function-return-type requires a single return type at all exits.
+// We wrap results in an object to satisfy the rule while keeping the union payload.
+interface ContentResult {
+  value: MessageContent | null;
+}
+
+function pickMessageContent(value: unknown): ContentResult {
+  if (typeof value === 'string') {
+    return { value };
+  }
+
+  if (Array.isArray(value)) {
+    return { value: value as ContentBlock[] };
+  }
+
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const text = asString(obj.text) ?? asString(obj.value);
+    if (text) {
+      return { value: text };
+    }
+  }
+
+  return { value: null };
+}
+
+function toDateOrNow(value?: string): Date {
+  if (!value) {
+    return new Date();
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return new Date();
+  }
+
+  return parsed;
 }
 
 // =============================================================================
@@ -334,7 +841,10 @@ export async function analyzeSessionFileMetadata(
 
   let firstUserMessage: { text: string; timestamp: string } | null = null;
   let firstCommandMessage: { text: string; timestamp: string } | null = null;
+  let firstAssistantMessage: { text: string; timestamp: string } | null = null;
+  let sessionMetadataFallback: { text: string; timestamp: string } | null = null;
   let messageCount = 0;
+  let totalConversationalEntries = 0;
   // After a UserGroup, await the first main-thread assistant message to count the AIGroup
   let awaitingAIGroup = false;
   let gitBranch: string | null = null;
@@ -359,17 +869,165 @@ export async function analyzeSessionFileMetadata(
       continue;
     }
 
-    let entry: ChatHistoryEntry;
+    let entry: Record<string, unknown>;
     try {
-      entry = JSON.parse(trimmed) as ChatHistoryEntry;
+      entry = JSON.parse(trimmed) as Record<string, unknown>;
     } catch {
       continue;
     }
 
-    const parsed = parseChatHistoryEntry(entry);
-    if (!parsed) {
+    // Try Copilot event format first: {type: "user.message", data: {content: "..."}, timestamp}
+    const eventType = typeof entry.type === 'string' ? entry.type : '';
+    if (eventType.includes('.')) {
+      // Copilot event format
+      const data = entry.data as Record<string, unknown> | undefined;
+      const copilotTs = (typeof entry.timestamp === 'string' ? entry.timestamp : null)
+        ?? (data && typeof data.timestamp === 'string' ? data.timestamp : null)
+        ?? new Date().toISOString();
+
+      // Extract content from common fields
+      const copilotContent = data
+        ? (typeof data.content === 'string' ? data.content.trim() : null)
+          ?? (typeof data.text === 'string' ? data.text.trim() : null)
+          ?? (typeof data.message === 'string' ? data.message.trim() : null)
+          ?? (typeof data.prompt === 'string' ? data.prompt.trim() : null)
+        : null;
+
+      // User messages: user.message, user.request, user.prompt, etc.
+      if (eventType.startsWith('user.') && copilotContent && copilotContent.length > 0) {
+        messageCount++;
+        totalConversationalEntries++;
+        if (!firstUserMessage) {
+          const sanitized = sanitizeDisplayContent(copilotContent);
+          if (sanitized.length > 0) {
+            firstUserMessage = {
+              text: sanitized.substring(0, 500),
+              timestamp: copilotTs,
+            };
+          }
+        }
+      }
+
+      // Assistant messages: assistant.message, assistant.response, etc.
+      if (eventType.startsWith('assistant.') && eventType !== 'assistant.message_delta') {
+        totalConversationalEntries++;
+        if (!firstAssistantMessage && copilotContent && copilotContent.length > 0) {
+          const sanitized = sanitizeDisplayContent(copilotContent);
+          if (sanitized.length > 0) {
+            firstAssistantMessage = {
+              text: sanitized.substring(0, 500),
+              timestamp: copilotTs,
+            };
+          }
+        }
+      }
+
+      // session.start: extract producer/sessionId as ultimate fallback title
+      if (eventType === 'session.start' && data && !sessionMetadataFallback) {
+        const producer = typeof data.producer === 'string' ? data.producer : null;
+        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : null;
+        const title = typeof data.title === 'string' ? data.title : null;
+        const name = typeof data.name === 'string' ? data.name : null;
+        const fallbackLabel = title ?? name ?? (producer ? `${producer} session` : null)
+          ?? (sessionId ? `Session ${sessionId.substring(0, 8)}` : null);
+        if (fallbackLabel) {
+          sessionMetadataFallback = {
+            text: fallbackLabel,
+            timestamp: copilotTs,
+          };
+        }
+      }
+
+      // For Copilot/Agency events, ongoing detection across varied event names.
+      const lowerEventType = eventType.toLowerCase();
+      const isAssistantDelta = lowerEventType === 'assistant.message_delta';
+      const isAssistantEnding =
+        lowerEventType.startsWith('assistant.') &&
+        !isAssistantDelta &&
+        !!copilotContent &&
+        copilotContent.length > 0;
+      const isSessionEnding =
+        lowerEventType === 'session.shutdown' ||
+        lowerEventType === 'session.error' ||
+        /^session\.(end|ended|stop|stopped|complete|completed|close|closed|shutdown|error)$/.test(
+          lowerEventType
+        );
+      const isToolStartActivity =
+        lowerEventType === 'tool.execution_start' ||
+        /^tool\..*(start|started|begin|began|invoke|invoked|call|called)$/.test(lowerEventType);
+      const isToolEnding =
+        lowerEventType === 'tool.execution_complete' ||
+        /^tool\..*(complete|completed|finish|finished|result|error|end|ended)$/.test(
+          lowerEventType
+        );
+
+      if (isAssistantEnding || isSessionEnding || isToolEnding) {
+        lastEndingIndex = activityIndex++;
+        hasActivityAfterLastEnding = false;
+      } else if (isToolStartActivity || isAssistantDelta) {
+        hasAnyOngoingActivity = true;
+        if (lastEndingIndex >= 0) {
+          hasActivityAfterLastEnding = true;
+        }
+        activityIndex++;
+      }
       continue;
     }
+
+    const claudeEntry = entry as unknown as ChatHistoryEntry;
+    const parsed = parseChatHistoryEntry(claudeEntry);
+    if (!parsed) {
+      // Even without uuid, count entries with type user/assistant for totalConversationalEntries
+      if (claudeEntry.type === 'user' || claudeEntry.type === 'assistant') {
+        totalConversationalEntries++;
+      }
+      // Try extracting firstUserMessage even without uuid (some tools omit uuid)
+      if (!firstUserMessage && claudeEntry.type === 'user') {
+        const content = claudeEntry.message?.content;
+        if (typeof content === 'string') {
+          if (!isCommandOutputContent(content) && !content.startsWith('[Request interrupted by user')) {
+            if (content.startsWith('<command-name>')) {
+              if (!firstCommandMessage) {
+                const commandMatch = /<command-name>\/([^<]+)<\/command-name>/.exec(content);
+                const commandName = commandMatch ? `/${commandMatch[1]}` : '/command';
+                firstCommandMessage = {
+                  text: commandName,
+                  timestamp: claudeEntry.timestamp ?? new Date().toISOString(),
+                };
+              }
+            } else {
+              const sanitized = sanitizeDisplayContent(content);
+              if (sanitized.length > 0) {
+                firstUserMessage = {
+                  text: sanitized.substring(0, 500),
+                  timestamp: claudeEntry.timestamp ?? new Date().toISOString(),
+                };
+              }
+            }
+          }
+        }
+      }
+      // Try extracting first assistant text as fallback title
+      if (!firstAssistantMessage && claudeEntry.type === 'assistant') {
+        const content = claudeEntry.message?.content;
+        if (Array.isArray(content)) {
+          const textContent = content
+            .filter(isTextContent)
+            .map((b) => b.text)
+            .join(' ')
+            .trim();
+          if (textContent.length > 0) {
+            firstAssistantMessage = {
+              text: textContent.substring(0, 500),
+              timestamp: claudeEntry.timestamp ?? new Date().toISOString(),
+            };
+          }
+        }
+      }
+      continue;
+    }
+
+    totalConversationalEntries++;
 
     if (isParsedUserChunkMessage(parsed)) {
       messageCount++;
@@ -384,12 +1042,12 @@ export async function analyzeSessionFileMetadata(
       awaitingAIGroup = false;
     }
 
-    if (!gitBranch && 'gitBranch' in entry && entry.gitBranch) {
-      gitBranch = entry.gitBranch;
+    if (!gitBranch && 'gitBranch' in claudeEntry && claudeEntry.gitBranch) {
+      gitBranch = claudeEntry.gitBranch;
     }
 
-    if (!firstUserMessage && entry.type === 'user') {
-      const content = entry.message?.content;
+    if (!firstUserMessage && claudeEntry.type === 'user') {
+      const content = claudeEntry.message?.content;
       if (typeof content === 'string') {
         if (isCommandOutputContent(content)) {
           // Skip
@@ -401,7 +1059,7 @@ export async function analyzeSessionFileMetadata(
             const commandName = commandMatch ? `/${commandMatch[1]}` : '/command';
             firstCommandMessage = {
               text: commandName,
-              timestamp: entry.timestamp ?? new Date().toISOString(),
+              timestamp: claudeEntry.timestamp ?? new Date().toISOString(),
             };
           }
         } else {
@@ -409,7 +1067,7 @@ export async function analyzeSessionFileMetadata(
           if (sanitized.length > 0) {
             firstUserMessage = {
               text: sanitized.substring(0, 500),
-              timestamp: entry.timestamp ?? new Date().toISOString(),
+              timestamp: claudeEntry.timestamp ?? new Date().toISOString(),
             };
           }
         }
@@ -427,7 +1085,28 @@ export async function analyzeSessionFileMetadata(
           if (sanitized.length > 0) {
             firstUserMessage = {
               text: sanitized.substring(0, 500),
-              timestamp: entry.timestamp ?? new Date().toISOString(),
+              timestamp: claudeEntry.timestamp ?? new Date().toISOString(),
+            };
+          }
+        }
+      }
+    }
+
+    // Fallback: extract first assistant text response as potential title
+    if (!firstAssistantMessage && claudeEntry.type === 'assistant') {
+      const content = claudeEntry.message?.content;
+      if (Array.isArray(content)) {
+        const textContent = content
+          .filter(isTextContent)
+          .map((b) => b.text)
+          .join(' ')
+          .trim();
+        if (textContent.length > 0) {
+          const sanitized = sanitizeDisplayContent(textContent);
+          if (sanitized.length > 0) {
+            firstAssistantMessage = {
+              text: sanitized.substring(0, 500),
+              timestamp: claudeEntry.timestamp ?? new Date().toISOString(),
             };
           }
         }
@@ -471,8 +1150,8 @@ export async function analyzeSessionFileMetadata(
     } else if (parsed.type === 'user' && Array.isArray(parsed.content)) {
       // Check if this is a user-rejected tool use (ending event, not ongoing activity)
       const isRejection =
-        'toolUseResult' in entry &&
-        (entry as unknown as Record<string, unknown>).toolUseResult === 'User rejected tool use';
+        'toolUseResult' in claudeEntry &&
+        (claudeEntry as unknown as Record<string, unknown>).toolUseResult === 'User rejected tool use';
 
       for (const block of parsed.content) {
         if (block.type === 'tool_result' && block.tool_use_id) {
@@ -580,8 +1259,8 @@ export async function analyzeSessionFileMetadata(
   }
 
   return {
-    firstUserMessage: firstUserMessage ?? firstCommandMessage,
-    messageCount,
+    firstUserMessage: firstUserMessage ?? firstCommandMessage ?? firstAssistantMessage ?? sessionMetadataFallback,
+    messageCount: messageCount > 0 ? messageCount : totalConversationalEntries,
     isOngoing: lastEndingIndex === -1 ? hasAnyOngoingActivity : hasActivityAfterLastEnding,
     gitBranch,
     contextConsumption,

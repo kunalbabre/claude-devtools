@@ -10,7 +10,7 @@ import { createPortal } from 'react-dom';
 import { useStore } from '@renderer/store';
 import { formatTokensCompact } from '@shared/utils/tokenFormatting';
 import { formatDistanceToNowStrict } from 'date-fns';
-import { EyeOff, MessageSquare, Pin } from 'lucide-react';
+import { EyeOff, MessageSquare, Pin, Sparkles } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 
 import { OngoingIndicator } from '../common/OngoingIndicator';
@@ -21,6 +21,7 @@ import type { PhaseTokenBreakdown, Session } from '@renderer/types/data';
 
 interface SessionItemProps {
   session: Session;
+  isLive?: boolean;
   isActive?: boolean;
   isPinned?: boolean;
   isHidden?: boolean;
@@ -132,6 +133,7 @@ const ConsumptionBadge = ({
 
 export const SessionItem = ({
   session,
+  isLive,
   isActive,
   isPinned,
   isHidden,
@@ -160,6 +162,7 @@ export const SessionItem = ({
   );
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const isSessionLive = isLive ?? session.isOngoing;
 
   const handleClick = (event: React.MouseEvent): void => {
     if (!activeProjectId) return;
@@ -264,7 +267,7 @@ export const SessionItem = ({
               className="size-3.5 shrink-0 accent-blue-500"
             />
           )}
-          {session.isOngoing && <OngoingIndicator />}
+          {isSessionLive && <OngoingIndicator />}
           {isPinned && <Pin className="size-2.5 shrink-0 text-blue-400" />}
           {isHidden && <EyeOff className="size-2.5 shrink-0 text-zinc-500" />}
           <span
@@ -275,11 +278,24 @@ export const SessionItem = ({
           </span>
         </div>
 
-        {/* Second line: message count + time + context consumption */}
+        {/* Second line: source badge + message count + time + context consumption */}
         <div
           className="mt-0.5 flex items-center gap-2 text-[10px] leading-tight"
           style={{ color: 'var(--color-text-muted)' }}
         >
+          {isSessionLive && (
+            <span
+              className="font-semibold uppercase tracking-wide"
+              style={{ color: 'var(--color-text-secondary)' }}
+            >
+              Live
+            </span>
+          )}
+          {session.source === 'copilot' && (
+            <span className="flex items-center gap-0.5 text-purple-400">
+              <Sparkles className="size-2.5" />
+            </span>
+          )}
           <span className="flex items-center gap-0.5">
             <MessageSquare className="size-2.5" />
             {session.messageCount}

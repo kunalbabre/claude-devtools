@@ -152,6 +152,51 @@ describe('FileWatcher', () => {
     watcher.stop();
   });
 
+  it('emits file-change for Copilot session-state events.jsonl updates', async () => {
+    const dataCache = new DataCache(50, 10, false);
+    const projectWatcher = createFakeWatcher();
+    const todoWatcher = createFakeWatcher();
+    const copilotWatcher = createFakeWatcher();
+    const existsSyncMock = vi.mocked(fs.existsSync);
+    existsSyncMock.mockReturnValue(true);
+
+    let copilotCallback: ((eventType: string, filename: string) => void) | null = null;
+    const watchMock = vi.mocked(fs.watch);
+    watchMock.mockImplementation((targetPath, optionsOrListener, maybeListener) => {
+      const listener =
+        typeof optionsOrListener === 'function' ? optionsOrListener : maybeListener;
+      if (targetPath.toString().includes('session-state') && listener) {
+        copilotCallback = listener as (eventType: string, filename: string) => void;
+        return copilotWatcher;
+      }
+      if (targetPath === '/tmp/projects') {
+        return projectWatcher;
+      }
+      return todoWatcher;
+    });
+
+    const watcher = new FileWatcher(dataCache, '/tmp/projects', '/tmp/todos');
+    const fileChangeHandler = vi.fn();
+    watcher.on('file-change', fileChangeHandler);
+
+    watcher.start();
+    expect(watchMock).toHaveBeenCalledTimes(3);
+    expect(copilotCallback).toBeTruthy();
+
+    copilotCallback?.('change', 'session-123/events.jsonl');
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(fileChangeHandler).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: '__copilot__',
+        sessionId: 'session-123',
+        isSubagent: false,
+      })
+    );
+
+    watcher.stop();
+  });
+
   it('keeps append offset pinned for partial trailing lines until completed', async () => {
     vi.useRealTimers();
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'filewatcher-'));

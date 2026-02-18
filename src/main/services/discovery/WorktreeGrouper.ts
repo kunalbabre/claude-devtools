@@ -60,6 +60,12 @@ export class WorktreeGrouper {
 
     await Promise.all(
       projects.map(async (project) => {
+        // Skip git identity resolution for synthetic Copilot projects
+        if (project.source === 'copilot') {
+          projectIdentities.set(project.id, null);
+          projectBranches.set(project.id, null);
+          return;
+        }
         const identity = await gitIdentityResolver.resolveIdentity(project.path);
         projectIdentities.set(project.id, identity);
 
@@ -76,10 +82,14 @@ export class WorktreeGrouper {
     const shouldFilterNoise = process.env.CLAUDE_DEVTOOLS_STRICT_SESSION_FILTER === '1';
     await Promise.all(
       projects.map(async (project) => {
-        const baseDir = extractBaseDir(project.id);
-        const projectPath = path.join(this.projectsDir, baseDir);
         const sessionFilter = subprojectRegistry.getSessionFilter(project.id);
         const filteredSessions: string[] = [];
+
+        // Copilot projects use their own path, not projectsDir
+        const projectPath =
+          project.source === 'copilot'
+            ? project.path
+            : path.join(this.projectsDir, extractBaseDir(project.id));
 
         for (const sessionId of project.sessions) {
           // Skip sessions that don't belong to this subproject
@@ -91,7 +101,19 @@ export class WorktreeGrouper {
             continue;
           }
 
-          const sessionPath = path.join(projectPath, `${sessionId}.jsonl`);
+          // For Copilot, check both directory and flat file layouts
+          let sessionPath = path.join(projectPath, `${sessionId}.jsonl`);
+          if (project.source === 'copilot') {
+            const eventsPath = path.join(projectPath, sessionId, 'events.jsonl');
+            try {
+              const fs = await import('fs');
+              if (fs.existsSync(eventsPath)) {
+                sessionPath = eventsPath;
+              }
+            } catch {
+              // fall through to default path
+            }
+          }
           if (await SessionContentFilter.hasNonNoiseMessages(sessionPath, this.fsProvider)) {
             filteredSessions.push(sessionId);
           }
@@ -190,6 +212,7 @@ export class WorktreeGrouper {
         name: group.identity?.name ?? group.projects[0].name,
         mostRecentSession: mostRecentSession > 0 ? mostRecentSession : undefined,
         totalSessions,
+        source: group.projects[0].source,
       });
     }
 

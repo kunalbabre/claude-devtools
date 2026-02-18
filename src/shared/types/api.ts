@@ -91,6 +91,10 @@ export interface ConfigAPI {
   selectClaudeRootFolder: () => Promise<ClaudeRootFolderSelection | null>;
   /** Get resolved Claude root path info for local mode */
   getClaudeRootInfo: () => Promise<ClaudeRootInfo>;
+  /** Open native dialog to select local Copilot root folder */
+  selectCopilotRootFolder: () => Promise<CopilotRootFolderSelection | null>;
+  /** Get resolved Copilot root path info for local mode */
+  getCopilotRootInfo: () => Promise<CopilotRootInfo>;
   /** Find Windows WSL Claude root candidates (UNC paths) */
   findWslClaudeRoots: () => Promise<WslClaudeRootCandidate[]>;
   /** Opens the config JSON file in an external editor */
@@ -125,6 +129,22 @@ export interface ClaudeRootFolderSelection {
   isClaudeDirName: boolean;
   /** Whether selected folder contains a "projects" directory */
   hasProjectsDir: boolean;
+}
+
+export interface CopilotRootInfo {
+  /** Auto-detected default Copilot session-state path for this machine */
+  defaultPath: string;
+  /** Effective path currently used by local context */
+  resolvedPath: string;
+  /** Custom override path from settings (null means auto-detect) */
+  customPath: string | null;
+}
+
+export interface CopilotRootFolderSelection {
+  /** Selected directory absolute path */
+  path: string;
+  /** Whether the selected folder contains session JSONL files */
+  hasSessionFiles: boolean;
 }
 
 export interface WslClaudeRootCandidate {

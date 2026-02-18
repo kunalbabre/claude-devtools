@@ -11,7 +11,13 @@
 
 import { LocalFileSystemProvider } from '@main/services/infrastructure/LocalFileSystemProvider';
 import { extractCwd } from '@main/utils/jsonl';
-import { decodePath, extractBaseDir, getProjectsBasePath } from '@main/utils/pathDecoder';
+import {
+  decodePath,
+  extractBaseDir,
+  getProjectsBasePath,
+  isSessionFileName,
+  isValidEncodedPath,
+} from '@main/utils/pathDecoder';
 import { createLogger } from '@shared/utils/logger';
 import * as path from 'path';
 
@@ -85,9 +91,12 @@ export class ProjectPathResolver {
       }
     }
 
-    const decoded = decodePath(extractBaseDir(projectId));
-    this.projectPathCache.set(projectId, decoded);
-    return decoded;
+    const baseDir = extractBaseDir(projectId);
+    const fallbackPath = isValidEncodedPath(baseDir)
+      ? decodePath(baseDir)
+      : path.join(this.projectsDir, baseDir);
+    this.projectPathCache.set(projectId, fallbackPath);
+    return fallbackPath;
   }
 
   /**
@@ -113,7 +122,7 @@ export class ProjectPathResolver {
     try {
       const entries = await this.fsProvider.readdir(projectDir);
       return entries
-        .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'))
+        .filter((entry) => entry.isFile() && isSessionFileName(entry.name))
         .map((entry) => path.join(projectDir, entry.name));
     } catch (error) {
       logger.error(`Failed to read session files for ${projectId}:`, error);

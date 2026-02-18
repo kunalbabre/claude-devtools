@@ -1,6 +1,8 @@
 import * as os from 'os';
 import * as path from 'path';
 
+const SESSION_FILE_EXTENSIONS = ['.jsonl', '.json'] as const;
+
 /**
  * Utility functions for encoding/decoding Claude Code project directory names.
  *
@@ -86,6 +88,11 @@ export function extractProjectName(encodedName: string, cwdHint?: string): strin
     const last = segments[segments.length - 1];
     if (last) return last;
   }
+
+  if (!isValidEncodedPath(encodedName)) {
+    return path.basename(encodedName);
+  }
+
   const decoded = decodePath(encodedName);
   const segments = decoded.split('/').filter(Boolean);
   return segments[segments.length - 1] || encodedName;
@@ -151,17 +158,44 @@ export function isValidProjectId(projectId: string): boolean {
     return false;
   }
 
+  // Virtual project IDs for non-Claude session sources
+  if (projectId === '__copilot__') {
+    return true;
+  }
+
   const sep = projectId.indexOf('::');
   if (sep === -1) {
-    // Plain encoded path
-    return isValidEncodedPath(projectId);
+    // Accept standard encoded paths or any safe directory name.
+    // Some tools (e.g., agency) create plain-named directories under ~/.claude/projects/
+    // that don't follow the encoded path convention (no leading dash).
+    return isValidEncodedPath(projectId) || isSafeDirectoryName(projectId);
   }
 
   // Composite ID: validate base part and hash suffix
   const basePart = projectId.slice(0, sep);
   const hashPart = projectId.slice(sep + 2);
 
-  return isValidEncodedPath(basePart) && /^[a-f0-9]{8}$/.test(hashPart);
+  return (isValidEncodedPath(basePart) || isSafeDirectoryName(basePart)) &&
+    /^[a-f0-9]{8}$/.test(hashPart);
+}
+
+/**
+ * Checks whether a string is a safe directory name (no path traversal,
+ * no null bytes, no path separators). Used as a fallback for project IDs
+ * that don't follow the standard encoded-path convention.
+ */
+function isSafeDirectoryName(name: string): boolean {
+  if (!name || name.length > 1024) {
+    return false;
+  }
+  // Block path traversal and path separators
+  if (name.includes('/') || name.includes('\\') || name.includes('\0')) {
+    return false;
+  }
+  if (name === '.' || name === '..' || name.includes('/..') || name.includes('\\..')) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -188,7 +222,15 @@ export function extractBaseDir(projectId: string): string {
  * @returns The session ID (e.g., "abc123")
  */
 export function extractSessionId(filename: string): string {
-  return filename.replace(/\.jsonl$/, '');
+  return filename.replace(/\.(jsonl|json)$/i, '');
+}
+
+/**
+ * Returns true if a filename is a supported session transcript file.
+ */
+export function isSessionFileName(filename: string): boolean {
+  const lower = filename.toLowerCase();
+  return SESSION_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
 // =============================================================================
@@ -306,4 +348,52 @@ export function getProjectsBasePath(): string {
  */
 export function getTodosBasePath(): string {
   return path.join(getClaudeBasePath(), 'todos');
+}
+
+// =============================================================================
+// Copilot Session Paths
+// =============================================================================
+
+let copilotBasePathOverride: string | null = null;
+
+function getDefaultCopilotBasePath(): string {
+  const xdgStateHome = process.env.XDG_STATE_HOME;
+  if (xdgStateHome) {
+    return path.join(xdgStateHome, '.copilot');
+  }
+  return path.join(getHomeDir(), '.copilot');
+}
+
+/**
+ * Get the auto-detected Copilot config base path (~/.copilot).
+ */
+export function getAutoDetectedCopilotBasePath(): string {
+  return getDefaultCopilotBasePath();
+}
+
+/**
+ * Override the Copilot config base path (~/.copilot).
+ * Pass null to return to auto-detection.
+ */
+export function setCopilotBasePathOverride(copilotBasePath: string | null | undefined): void {
+  if (copilotBasePath == null) {
+    copilotBasePathOverride = null;
+    return;
+  }
+  copilotBasePathOverride = normalizeOverridePath(copilotBasePath);
+}
+
+/**
+ * Get the Copilot config base path (~/.copilot).
+ */
+export function getCopilotBasePath(): string {
+  return copilotBasePathOverride ?? getDefaultCopilotBasePath();
+}
+
+/**
+ * Get the Copilot session-state directory path (~/.copilot/session-state).
+ * This is the directory where Copilot Background Agent stores JSONL session logs.
+ */
+export function getCopilotSessionsBasePath(): string {
+  return path.join(getCopilotBasePath(), 'session-state');
 }

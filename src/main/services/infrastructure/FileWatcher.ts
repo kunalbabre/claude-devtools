@@ -12,7 +12,11 @@
 
 import { type FileChangeEvent, type ParsedMessage } from '@main/types';
 import { parseJsonlFile, parseJsonlLine } from '@main/utils/jsonl';
-import { getProjectsBasePath, getTodosBasePath } from '@main/utils/pathDecoder';
+import {
+  getCopilotSessionsBasePath,
+  getProjectsBasePath,
+  getTodosBasePath,
+} from '@main/utils/pathDecoder';
 import { createLogger } from '@shared/utils/logger';
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
@@ -54,9 +58,11 @@ interface ActiveSessionFile {
 export class FileWatcher extends EventEmitter {
   private projectsWatcher: fs.FSWatcher | null = null;
   private todosWatcher: fs.FSWatcher | null = null;
+  private copilotWatcher: fs.FSWatcher | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
   private projectsPath: string;
   private todosPath: string;
+  private copilotSessionsPath: string;
   private dataCache: DataCache;
   private fsProvider: FileSystemProvider;
   private notificationManager: NotificationManager | null = null;
@@ -96,6 +102,7 @@ export class FileWatcher extends EventEmitter {
     super();
     this.projectsPath = projectsPath ?? getProjectsBasePath();
     this.todosPath = todosPath ?? getTodosBasePath();
+    this.copilotSessionsPath = getCopilotSessionsBasePath();
     this.dataCache = dataCache;
     this.fsProvider = fsProvider ?? new LocalFileSystemProvider();
   }
@@ -161,6 +168,11 @@ export class FileWatcher extends EventEmitter {
     if (this.todosWatcher) {
       this.todosWatcher.close();
       this.todosWatcher = null;
+    }
+
+    if (this.copilotWatcher) {
+      this.copilotWatcher.close();
+      this.copilotWatcher = null;
     }
 
     // Clear any pending debounce timers
@@ -317,6 +329,37 @@ export class FileWatcher extends EventEmitter {
     }
   }
 
+  /**
+   * Starts the Copilot session-state watcher (~/.copilot/session-state).
+   * This directory is optional; if not present we skip without retry spam.
+   */
+  private startCopilotWatcher(): void {
+    if (this.copilotWatcher) {
+      return;
+    }
+
+    try {
+      if (!fs.existsSync(this.copilotSessionsPath)) {
+        return;
+      }
+
+      this.copilotWatcher = fs.watch(
+        this.copilotSessionsPath,
+        { recursive: true },
+        (eventType, filename) => {
+          if (filename) {
+            this.handleCopilotChange(eventType, filename);
+          }
+        }
+      );
+      this.attachWatcherRecovery(this.copilotWatcher, 'copilot');
+      logger.info(`FileWatcher: Started watching Copilot sessions at ${this.copilotSessionsPath}`);
+    } catch (error) {
+      logger.error('Error starting Copilot sessions watcher:', error);
+      this.copilotWatcher = null;
+    }
+  }
+
   private ensureWatchers(): void {
     if (!this.isWatching || this.fsProvider.type === 'ssh') {
       return;
@@ -324,6 +367,7 @@ export class FileWatcher extends EventEmitter {
 
     this.startProjectsWatcher();
     this.startTodosWatcher();
+    this.startCopilotWatcher();
 
     if (!this.projectsWatcher || !this.todosWatcher) {
       this.scheduleWatcherRetry();
@@ -341,11 +385,16 @@ export class FileWatcher extends EventEmitter {
     }, WATCHER_RETRY_MS);
   }
 
-  private attachWatcherRecovery(watcher: fs.FSWatcher, watcherType: 'projects' | 'todos'): void {
+  private attachWatcherRecovery(
+    watcher: fs.FSWatcher,
+    watcherType: 'projects' | 'todos' | 'copilot'
+  ): void {
     watcher.on('error', (error) => {
       logger.error(`FileWatcher: ${watcherType} watcher error:`, error);
       if (watcherType === 'projects') {
         this.projectsWatcher = null;
+      } else if (watcherType === 'copilot') {
+        this.copilotWatcher = null;
       } else {
         this.todosWatcher = null;
       }
@@ -358,6 +407,8 @@ export class FileWatcher extends EventEmitter {
       }
       if (watcherType === 'projects') {
         this.projectsWatcher = null;
+      } else if (watcherType === 'copilot') {
+        this.copilotWatcher = null;
       } else {
         this.todosWatcher = null;
       }
@@ -486,6 +537,80 @@ export class FileWatcher extends EventEmitter {
       this.debounce(filename, () => this.processProjectsChange(eventType, filename));
     } catch (error) {
       logger.error('Error handling projects change:', error);
+    }
+  }
+
+  /**
+   * Handles file change events in Copilot session-state directory.
+   */
+  private handleCopilotChange(eventType: string, filename: string): void {
+    try {
+      if (!filename.endsWith('.jsonl')) {
+        return;
+      }
+
+      this.debounce(`copilot:${filename}`, () => this.processCopilotChange(eventType, filename));
+    } catch (error) {
+      logger.error('Error handling Copilot sessions change:', error);
+    }
+  }
+
+  /**
+   * Process a debounced Copilot sessions directory change.
+   */
+  private async processCopilotChange(eventType: string, filename: string): Promise<void> {
+    const fullPath = path.isAbsolute(filename)
+      ? path.normalize(filename)
+      : path.join(this.copilotSessionsPath, filename);
+    const relativePath = path.relative(this.copilotSessionsPath, fullPath);
+
+    if (relativePath.startsWith('..')) {
+      return;
+    }
+
+    const parts = relativePath.split(/[\\/]/).filter(Boolean);
+    let sessionId: string | undefined;
+
+    // Legacy flat file: session-state/{sessionId}.jsonl
+    if (parts.length === 1 && parts[0].endsWith('.jsonl')) {
+      sessionId = path.basename(parts[0], '.jsonl');
+    }
+    // Current layout: session-state/{sessionId}/events.jsonl
+    else if (parts.length === 2 && parts[1] === 'events.jsonl') {
+      sessionId = parts[0];
+    }
+
+    if (!sessionId) {
+      return;
+    }
+
+    const fileExists = await this.fsProvider.exists(fullPath);
+    const changeType: FileChangeEvent['type'] =
+      eventType === 'rename' ? (fileExists ? 'add' : 'unlink') : 'change';
+
+    const projectId = '__copilot__';
+    this.dataCache.invalidateSession(projectId, sessionId);
+    projectPathResolver.invalidateProject(projectId);
+    if (changeType === 'unlink') {
+      this.clearErrorTracking(fullPath);
+    }
+
+    const event: FileChangeEvent = {
+      type: changeType,
+      path: fullPath,
+      projectId,
+      sessionId,
+      isSubagent: false,
+    };
+
+    this.emit('file-change', event);
+    logger.info(`FileWatcher: ${changeType} Copilot session - ${relativePath}`);
+
+    if (changeType !== 'unlink' && this.notificationManager) {
+      this.activeSessionFiles.set(fullPath, { projectId, sessionId });
+      this.detectErrorsInSessionFile(projectId, sessionId, fullPath).catch((err) => {
+        logger.error('Error detecting errors in Copilot session file:', err);
+      });
     }
   }
 

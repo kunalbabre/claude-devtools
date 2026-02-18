@@ -22,7 +22,7 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 
 import { initializeIpcHandlers, removeIpcHandlers } from './ipc/handlers';
-import { getProjectsBasePath, getTodosBasePath } from './utils/pathDecoder';
+import { getCopilotSessionsBasePath, getProjectsBasePath, getTodosBasePath } from './utils/pathDecoder';
 
 // Window icon path for non-mac platforms.
 const getWindowIconPath = (): string | undefined => {
@@ -196,12 +196,15 @@ function reconfigureLocalContextForClaudeRoot(): void {
       currentLocal.stopFileWatcher();
     }
 
+    const copilotSessionsDir = getCopilotSessionsBasePath();
+
     const replacementLocal = new ServiceContext({
       id: 'local',
       type: 'local',
       fsProvider: new LocalFileSystemProvider(),
       projectsDir,
       todosDir,
+      copilotSessionsDir,
     });
 
     if (notificationManager) {
@@ -237,6 +240,7 @@ function initializeServices(): void {
 
   const localProjectsDir = getProjectsBasePath();
   const localTodosDir = getTodosBasePath();
+  const localCopilotSessionsDir = getCopilotSessionsBasePath();
 
   // Create local context
   const localContext = new ServiceContext({
@@ -245,6 +249,7 @@ function initializeServices(): void {
     fsProvider: new LocalFileSystemProvider(),
     projectsDir: localProjectsDir,
     todosDir: localTodosDir,
+    copilotSessionsDir: localCopilotSessionsDir,
   });
 
   // Register and start local context
@@ -271,6 +276,9 @@ function initializeServices(): void {
     rewire: rewireContextEvents,
     full: onContextSwitched,
     onClaudeRootPathUpdated: (_claudeRootPath: string | null) => {
+      reconfigureLocalContextForClaudeRoot();
+    },
+    onCopilotRootPathUpdated: (_copilotRootPath: string | null) => {
       reconfigureLocalContextForClaudeRoot();
     },
   });

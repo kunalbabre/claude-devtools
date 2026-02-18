@@ -69,6 +69,7 @@ export function initializeIpcHandlers(
     rewire: (context: ServiceContext) => void;
     full: (context: ServiceContext) => void;
     onClaudeRootPathUpdated: (claudeRootPath: string | null) => Promise<void> | void;
+    onCopilotRootPathUpdated: (copilotRootPath: string | null) => Promise<void> | void;
   }
 ): void {
   // Initialize domain handlers with registry
@@ -81,6 +82,7 @@ export function initializeIpcHandlers(
   initializeContextHandlers(registry, contextCallbacks.rewire);
   initializeConfigHandlers({
     onClaudeRootPathUpdated: contextCallbacks.onClaudeRootPathUpdated,
+    onCopilotRootPathUpdated: contextCallbacks.onCopilotRootPathUpdated,
   });
 
   // Register all handlers

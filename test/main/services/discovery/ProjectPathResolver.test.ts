@@ -70,6 +70,16 @@ describe('ProjectPathResolver', () => {
     expect(resolved).toBe('C:/Users/test/my/repo');
   });
 
+  it('falls back to project directory path for non-encoded IDs', async () => {
+    const projectsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'resolver-projects-'));
+    tempDirs.push(projectsDir);
+
+    const resolver = new ProjectPathResolver(projectsDir);
+    const resolved = await resolver.resolveProjectPath('copilot-workspace');
+
+    expect(resolved).toBe(path.join(projectsDir, 'copilot-workspace'));
+  });
+
   it('invalidates cached paths by project', async () => {
     const projectsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'resolver-projects-'));
     tempDirs.push(projectsDir);

@@ -17,7 +17,13 @@
  * - config:testTrigger: Test a trigger against historical session data
  */
 
-import { getAutoDetectedClaudeBasePath, getClaudeBasePath } from '@main/utils/pathDecoder';
+import {
+  getAutoDetectedClaudeBasePath,
+  getAutoDetectedCopilotBasePath,
+  getClaudeBasePath,
+  getCopilotBasePath,
+  getCopilotSessionsBasePath,
+} from '@main/utils/pathDecoder';
 import { getErrorMessage } from '@shared/utils/errorHandling';
 import { createLogger } from '@shared/utils/logger';
 import { execFile } from 'child_process';
@@ -43,6 +49,8 @@ import type { TriggerColor } from '@shared/constants/triggerColors';
 import type {
   ClaudeRootFolderSelection,
   ClaudeRootInfo,
+  CopilotRootFolderSelection,
+  CopilotRootInfo,
   WslClaudeRootCandidate,
 } from '@shared/types';
 
@@ -51,8 +59,12 @@ const execFileAsync = promisify(execFile);
 
 // Get singleton instance
 const configManager = ConfigManager.getInstance();
-let onClaudeRootPathUpdated: ((claudeRootPath: string | null) => Promise<void> | void) | null =
-  null;
+let onClaudeRootPathUpdated:
+  | ((claudeRootPath: string | null) => Promise<void> | void)
+  | null = null;
+let onCopilotRootPathUpdated:
+  | ((copilotRootPath: string | null) => Promise<void> | void)
+  | null = null;
 
 /**
  * Response type for config operations
@@ -69,9 +81,11 @@ interface ConfigResult<T = void> {
 export function initializeConfigHandlers(
   options: {
     onClaudeRootPathUpdated?: (claudeRootPath: string | null) => Promise<void> | void;
+    onCopilotRootPathUpdated?: (copilotRootPath: string | null) => Promise<void> | void;
   } = {}
 ): void {
   onClaudeRootPathUpdated = options.onClaudeRootPathUpdated ?? null;
+  onCopilotRootPathUpdated = options.onCopilotRootPathUpdated ?? null;
 }
 
 /**
@@ -117,6 +131,8 @@ export function registerConfigHandlers(ipcMain: IpcMain): void {
   ipcMain.handle('config:selectFolders', handleSelectFolders);
   ipcMain.handle('config:selectClaudeRootFolder', handleSelectClaudeRootFolder);
   ipcMain.handle('config:getClaudeRootInfo', handleGetClaudeRootInfo);
+  ipcMain.handle('config:selectCopilotRootFolder', handleSelectCopilotRootFolder);
+  ipcMain.handle('config:getCopilotRootInfo', handleGetCopilotRootInfo);
   ipcMain.handle('config:findWslClaudeRoots', handleFindWslClaudeRoots);
 
   // Editor handlers
@@ -163,6 +179,10 @@ async function handleUpdateConfig(
       validation.section === 'general' &&
       Object.prototype.hasOwnProperty.call(validation.data, 'claudeRootPath');
 
+    const isCopilotRootUpdate =
+      validation.section === 'general' &&
+      Object.prototype.hasOwnProperty.call(validation.data, 'copilotRootPath');
+
     configManager.updateConfig(validation.section, validation.data);
 
     if (isClaudeRootUpdate && onClaudeRootPathUpdated) {
@@ -172,6 +192,16 @@ async function handleUpdateConfig(
         await onClaudeRootPathUpdated(nextClaudeRootPath ?? null);
       } catch (callbackError) {
         logger.error('Failed to apply updated Claude root path at runtime:', callbackError);
+      }
+    }
+
+    if (isCopilotRootUpdate && onCopilotRootPathUpdated) {
+      const nextCopilotRootPath = (validation.data as { copilotRootPath?: string | null })
+        .copilotRootPath;
+      try {
+        await onCopilotRootPathUpdated(nextCopilotRootPath ?? null);
+      } catch (callbackError) {
+        logger.error('Failed to apply updated Copilot root path at runtime:', callbackError);
       }
     }
 
@@ -733,6 +763,92 @@ async function handleGetClaudeRootInfo(
   }
 }
 
+/**
+ * Handler for 'config:selectCopilotRootFolder' - Opens native folder picker for Copilot session-state root.
+ */
+async function handleSelectCopilotRootFolder(
+  _event: IpcMainInvokeEvent
+): Promise<ConfigResult<CopilotRootFolderSelection | null>> {
+  try {
+    const focusedWindow = BrowserWindow.getFocusedWindow();
+    const currentRootPath = getCopilotBasePath();
+    const dialogOptions: Electron.OpenDialogOptions = {
+      properties: ['openDirectory'],
+      title: 'Select Copilot Session Storage Folder',
+      buttonLabel: 'Select Folder',
+      defaultPath: currentRootPath,
+    };
+
+    const result = focusedWindow
+      ? await dialog.showOpenDialog(focusedWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: true, data: null };
+    }
+
+    const selectedPath = path.resolve(path.normalize(result.filePaths[0]));
+
+    // Check if folder contains .jsonl files (session data)
+    const hasSessionFiles = (() => {
+      try {
+        const entries = fs.readdirSync(selectedPath);
+        return entries.some((e) => e.endsWith('.jsonl'));
+      } catch {
+        return false;
+      }
+    })();
+
+    return {
+      success: true,
+      data: {
+        path: selectedPath,
+        hasSessionFiles,
+      },
+    };
+  } catch (error) {
+    logger.error('Error in config:selectCopilotRootFolder:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to open Copilot root folder dialog',
+    };
+  }
+}
+
+/**
+ * Handler for 'config:getCopilotRootInfo' - Returns default/custom/effective Copilot session-state paths.
+ */
+async function handleGetCopilotRootInfo(
+  _event: IpcMainInvokeEvent
+): Promise<ConfigResult<CopilotRootInfo>> {
+  try {
+    const customPath = configManager.getConfig().general.copilotRootPath;
+    const defaultPath = getAutoDetectedCopilotBasePath();
+    const resolvedPath = getCopilotSessionsBasePath();
+
+    return {
+      success: true,
+      data: {
+        defaultPath,
+        resolvedPath,
+        customPath,
+      },
+    };
+  } catch (error) {
+    logger.error('Error in config:getCopilotRootInfo:', error);
+
+    const fallbackDefault = getAutoDetectedCopilotBasePath();
+    return {
+      success: true,
+      data: {
+        defaultPath: fallbackDefault,
+        resolvedPath: fallbackDefault,
+        customPath: null,
+      },
+    };
+  }
+}
+
 function normalizeWslHomePath(home: string): string | null {
   const trimmed = home.trim();
   if (!trimmed.startsWith('/')) {
@@ -1081,6 +1197,8 @@ export function removeConfigHandlers(ipcMain: IpcMain): void {
   ipcMain.removeHandler('config:selectFolders');
   ipcMain.removeHandler('config:selectClaudeRootFolder');
   ipcMain.removeHandler('config:getClaudeRootInfo');
+  ipcMain.removeHandler('config:selectCopilotRootFolder');
+  ipcMain.removeHandler('config:getCopilotRootInfo');
   ipcMain.removeHandler('config:findWslClaudeRoots');
   ipcMain.removeHandler('config:openInEditor');
   logger.info('Config handlers removed');

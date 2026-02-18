@@ -19,7 +19,7 @@ import {
   type SemanticStep,
 } from '@main/types';
 import { parseJsonlFile } from '@main/utils/jsonl';
-import { extractBaseDir, extractSessionId } from '@main/utils/pathDecoder';
+import { extractBaseDir, extractSessionId, isSessionFileName } from '@main/utils/pathDecoder';
 import { sanitizeDisplayContent } from '@shared/utils/contentSanitizer';
 import { createLogger } from '@shared/utils/logger';
 import {
@@ -98,7 +98,7 @@ export class SessionSearcher {
       // Get all session files
       const entries = await this.fsProvider.readdir(projectPath);
       const sessionEntries = entries.filter((entry) => {
-        if (!entry.isFile() || !entry.name.endsWith('.jsonl')) return false;
+        if (!entry.isFile() || !isSessionFileName(entry.name)) return false;
         // Filter to only sessions belonging to this subproject
         if (sessionFilter) {
           const sessionId = extractSessionId(entry.name);

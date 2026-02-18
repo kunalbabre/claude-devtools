@@ -43,6 +43,8 @@ export interface ServiceContextConfig {
   projectsDir?: string;
   /** Todos directory path (defaults to ~/.claude/todos) */
   todosDir?: string;
+  /** Copilot session-state directory path (defaults to ~/.copilot/session-state) */
+  copilotSessionsDir?: string | null;
 }
 
 /**
@@ -92,7 +94,8 @@ export class ServiceContext {
     this.projectScanner = new ProjectScanner(
       config.projectsDir,
       config.todosDir,
-      config.fsProvider
+      config.fsProvider,
+      config.copilotSessionsDir
     );
 
     // 2. SessionParser - depends on ProjectScanner

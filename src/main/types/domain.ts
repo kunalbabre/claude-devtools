@@ -57,6 +57,8 @@ export interface Project {
   createdAt: number;
   /** Unix timestamp of most recent session activity */
   mostRecentSession?: number;
+  /** Session source: 'claude' for Claude Code, 'copilot' for GitHub Copilot */
+  source?: 'claude' | 'copilot';
 }
 
 /**
@@ -103,6 +105,8 @@ export interface Session {
   gitBranch?: string;
   /** Metadata completeness level */
   metadataLevel?: SessionMetadataLevel;
+  /** Session source: 'claude' for Claude Code, 'copilot' for GitHub Copilot */
+  source?: 'claude' | 'copilot';
   /** Total context consumed (compaction-aware sum of all phases) */
   contextConsumption?: number;
   /** Number of compaction events */
@@ -209,6 +213,8 @@ export interface RepositoryGroup {
   mostRecentSession?: number;
   /** Total session count across all worktrees */
   totalSessions: number;
+  /** Session source: 'claude' for Claude Code, 'copilot' for GitHub Copilot */
+  source?: 'claude' | 'copilot';
 }
 
 // =============================================================================

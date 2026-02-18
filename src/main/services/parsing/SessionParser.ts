@@ -22,6 +22,7 @@ import {
   getTaskCalls,
   parseJsonlFile,
 } from '@main/utils/jsonl';
+import { extractSessionId } from '@main/utils/pathDecoder';
 import * as path from 'path';
 
 import { type ProjectScanner } from '../discovery/ProjectScanner';
@@ -66,7 +67,10 @@ export class SessionParser {
    * Parse a session JSONL file and return structured data.
    */
   async parseSession(projectId: string, sessionId: string): Promise<ParsedSession> {
-    const sessionPath = this.projectScanner.getSessionPath(projectId, sessionId);
+    const sessionFiles = await this.projectScanner.listSessionFiles(projectId);
+    const sessionPath =
+      sessionFiles.find((file) => extractSessionId(path.basename(file)) === sessionId) ??
+      this.projectScanner.getSessionPath(projectId, sessionId);
     return this.parseSessionFile(sessionPath);
   }
 

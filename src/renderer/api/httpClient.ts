@@ -14,6 +14,8 @@ import type {
   ConfigAPI,
   ContextInfo,
   ConversationGroup,
+  CopilotRootFolderSelection,
+  CopilotRootInfo,
   ElectronAPI,
   FileChangeEvent,
   HttpServerAPI,
@@ -423,6 +425,19 @@ export class HttpAPIClient implements ElectronAPI {
         defaultPath: fallbackPath,
         resolvedPath: fallbackPath,
         customPath: config.general.claudeRootPath,
+      };
+    },
+    selectCopilotRootFolder: async (): Promise<CopilotRootFolderSelection | null> => {
+      console.warn('[HttpAPIClient] selectCopilotRootFolder is not available in browser mode');
+      return null;
+    },
+    getCopilotRootInfo: async (): Promise<CopilotRootInfo> => {
+      const config = await this.config.get();
+      const fallbackPath = config.general.copilotRootPath ?? '~/.copilot/session-state';
+      return {
+        defaultPath: fallbackPath,
+        resolvedPath: fallbackPath,
+        customPath: config.general.copilotRootPath,
       };
     },
     findWslClaudeRoots: async (): Promise<WslClaudeRootCandidate[]> => {
