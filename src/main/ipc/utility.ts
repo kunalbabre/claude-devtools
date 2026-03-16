@@ -12,7 +12,9 @@ import { createLogger } from '@shared/utils/logger';
 import { app, type IpcMain, type IpcMainInvokeEvent, shell } from 'electron';
 import * as fs from 'fs';
 
-import { type ClaudeMdFileInfo, readAllClaudeMdFiles, readDirectoryClaudeMd } from '../services';
+import { type ClaudeMdFileInfo, readAgentConfigs, readAllClaudeMdFiles, readDirectoryClaudeMd } from '../services';
+
+import type { AgentConfig } from '@shared/types/api';
 
 const logger = createLogger('IPC:utility');
 import { validateFilePath, validateOpenPath } from '../utils/pathValidation';
@@ -28,6 +30,7 @@ export function registerUtilityHandlers(ipcMain: IpcMain): void {
   ipcMain.handle('read-claude-md-files', handleReadClaudeMdFiles);
   ipcMain.handle('read-directory-claude-md', handleReadDirectoryClaudeMd);
   ipcMain.handle('read-mentioned-file', handleReadMentionedFile);
+  ipcMain.handle('read-agent-configs', handleReadAgentConfigs);
 
   logger.info('Utility handlers registered');
 }
@@ -42,6 +45,7 @@ export function removeUtilityHandlers(ipcMain: IpcMain): void {
   ipcMain.removeHandler('read-claude-md-files');
   ipcMain.removeHandler('read-directory-claude-md');
   ipcMain.removeHandler('read-mentioned-file');
+  ipcMain.removeHandler('read-agent-configs');
 
   logger.info('Utility handlers removed');
 }
@@ -109,7 +113,9 @@ async function handleShellOpenPath(
     const safePath = validation.normalizedPath!;
 
     // Check if path exists
-    if (!fs.existsSync(safePath)) {
+    try {
+      await fs.promises.access(safePath);
+    } catch {
       logger.error(`shell:openPath - path does not exist: ${safePath}`);
       return { success: false, error: 'Path does not exist' };
     }
@@ -196,18 +202,20 @@ async function handleReadMentionedFile(
     const safePath = validation.normalizedPath!;
 
     // Check if file exists
-    if (!fs.existsSync(safePath)) {
+    try {
+      await fs.promises.access(safePath);
+    } catch {
       return null;
     }
 
     // Check if it's a file (not directory)
-    const stats = fs.statSync(safePath);
+    const stats = await fs.promises.stat(safePath);
     if (!stats.isFile()) {
       return null;
     }
 
     // Read file content
-    const content = fs.readFileSync(safePath, 'utf8');
+    const content = await fs.promises.readFile(safePath, 'utf8');
 
     // Calculate tokens
     const estimatedTokens = countTokens(content);
@@ -226,5 +234,21 @@ async function handleReadMentionedFile(
   } catch (error) {
     logger.error(`Error in read-mentioned-file for ${absolutePath}:`, error);
     return null;
+  }
+}
+
+/**
+ * Handler for 'read-agent-configs' IPC call.
+ * Reads agent definitions from project's .claude/agents/ directory.
+ */
+async function handleReadAgentConfigs(
+  _event: IpcMainInvokeEvent,
+  projectRoot: string
+): Promise<Record<string, AgentConfig>> {
+  try {
+    return await readAgentConfigs(projectRoot);
+  } catch (error) {
+    logger.error('Error in read-agent-configs:', error);
+    return {};
   }
 }

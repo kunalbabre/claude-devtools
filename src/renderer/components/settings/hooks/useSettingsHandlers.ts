@@ -288,6 +288,8 @@ export function useSettingsHandlers({
           defaultTab: 'dashboard',
           claudeRootPath: null,
           copilotRootPath: null,
+          autoExpandAIGroups: false,
+          useNativeTitleBar: false,
         },
         display: {
           showTimestamps: true,

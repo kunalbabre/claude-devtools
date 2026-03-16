@@ -29,9 +29,11 @@ import { useShallow } from 'zustand/react/shallow';
 
 import {
   createSearchContext,
+  EMPTY_SEARCH_MATCHES,
   highlightSearchInChildren,
   type SearchContext,
 } from '../searchHighlightUtils';
+import { highlightLine } from '../viewers/syntaxHighlighter';
 
 // =============================================================================
 // Types
@@ -154,9 +156,18 @@ function createViewerMarkdownComponents(searchCtx: SearchContext | null): Compon
       const isBlock = (hasLanguage ?? false) || isMultiLine;
 
       if (isBlock) {
+        const lang = codeClassName?.replace('language-', '') ?? '';
+        const raw = typeof children === 'string' ? children : '';
+        const text = raw.replace(/\n$/, '');
+        const lines = text.split('\n');
         return (
           <code className="font-mono text-xs" style={{ color: COLOR_TEXT }}>
-            {hl(children)}
+            {lines.map((line, i) => (
+              <React.Fragment key={i}>
+                {hl(highlightLine(line, lang))}
+                {i < lines.length - 1 ? '\n' : null}
+              </React.Fragment>
+            ))}
           </code>
         );
       }
@@ -274,13 +285,16 @@ export const MarkdownViewer: React.FC<MarkdownViewerProps> = ({
   itemId,
   copyable = false,
 }) => {
-  // Only subscribe to search store when itemId is provided
+  // Only re-render if THIS item has search matches
   const { searchQuery, searchMatches, currentSearchIndex } = useStore(
-    useShallow((s) => ({
-      searchQuery: itemId ? s.searchQuery : '',
-      searchMatches: itemId ? s.searchMatches : [],
-      currentSearchIndex: itemId ? s.currentSearchIndex : -1,
-    }))
+    useShallow((s) => {
+      const hasMatch = itemId ? s.searchMatchItemIds.has(itemId) : false;
+      return {
+        searchQuery: hasMatch ? s.searchQuery : '',
+        searchMatches: hasMatch ? s.searchMatches : EMPTY_SEARCH_MATCHES,
+        currentSearchIndex: hasMatch ? s.currentSearchIndex : -1,
+      };
+    })
   );
 
   // Create search context (fresh each render so counter starts at 0)

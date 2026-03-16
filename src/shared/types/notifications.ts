@@ -264,6 +264,10 @@ export interface AppConfig {
     claudeRootPath: string | null;
     /** Optional custom Copilot session-state folder (auto-detected when null) */
     copilotRootPath: string | null;
+    /** Whether to auto-expand AI response groups when opening a transcript or receiving new messages */
+    autoExpandAIGroups: boolean;
+    /** Whether to use the native OS title bar instead of the custom one (Linux/Windows) */
+    useNativeTitleBar: boolean;
   };
   /** Display and UI settings */
   display: {

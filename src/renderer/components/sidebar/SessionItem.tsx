@@ -4,7 +4,7 @@
  * Supports right-click context menu for pane management.
  */
 
-import { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useStore } from '@renderer/store';
@@ -131,7 +131,7 @@ const ConsumptionBadge = ({
   );
 };
 
-export const SessionItem = ({
+export const SessionItem = React.memo(function SessionItem({
   session,
   isLive,
   isActive,
@@ -140,7 +140,7 @@ export const SessionItem = ({
   multiSelectActive,
   isSelected,
   onToggleSelect,
-}: Readonly<SessionItemProps>): React.JSX.Element => {
+}: Readonly<SessionItemProps>): React.JSX.Element {
   const {
     openTab,
     activeProjectId,
@@ -337,4 +337,4 @@ export const SessionItem = ({
         )}
     </>
   );
-};
+});

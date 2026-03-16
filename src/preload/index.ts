@@ -2,6 +2,7 @@ import { WINDOW_ZOOM_FACTOR_CHANGED_CHANNEL } from '@shared/constants';
 import { contextBridge, ipcRenderer } from 'electron';
 
 import {
+  APP_RELAUNCH,
   CONTEXT_CHANGED,
   CONTEXT_GET_ACTIVE,
   CONTEXT_LIST,
@@ -9,6 +10,7 @@ import {
   HTTP_SERVER_GET_STATUS,
   HTTP_SERVER_START,
   HTTP_SERVER_STOP,
+  SESSION_REFRESH,
   SSH_CONNECT,
   SSH_DISCONNECT,
   SSH_GET_CONFIG_HOSTS,
@@ -139,6 +141,8 @@ const electronAPI: ElectronAPI = {
   ) => ipcRenderer.invoke('get-sessions-paginated', projectId, cursor, limit, options),
   searchSessions: (projectId: string, query: string, maxResults?: number) =>
     ipcRenderer.invoke('search-sessions', projectId, query, maxResults),
+  searchAllProjects: (query: string, maxResults?: number) =>
+    ipcRenderer.invoke('search-all-projects', query, maxResults),
   getSessionDetail: (projectId: string, sessionId: string) =>
     ipcRenderer.invoke('get-session-detail', projectId, sessionId),
   getSessionMetrics: (projectId: string, sessionId: string) =>
@@ -170,6 +174,10 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.invoke('read-directory-claude-md', dirPath),
   readMentionedFile: (absolutePath: string, projectRoot: string, maxTokens?: number) =>
     ipcRenderer.invoke('read-mentioned-file', absolutePath, projectRoot, maxTokens),
+
+  // Agent config reading
+  readAgentConfigs: (projectRoot: string) =>
+    ipcRenderer.invoke('read-agent-configs', projectRoot),
 
   // Notifications API
   notifications: {
@@ -352,6 +360,15 @@ const electronAPI: ElectronAPI = {
     };
   },
 
+  // Session refresh event (Ctrl+R / Cmd+R intercepted by main process)
+  onSessionRefresh: (callback: () => void): (() => void) => {
+    const listener = (): void => callback();
+    ipcRenderer.on(SESSION_REFRESH, listener);
+    return (): void => {
+      ipcRenderer.removeListener(SESSION_REFRESH, listener);
+    };
+  },
+
   // Shell operations
   openPath: (targetPath: string, projectRoot?: string) =>
     ipcRenderer.invoke('shell:openPath', targetPath, projectRoot),
@@ -363,6 +380,7 @@ const electronAPI: ElectronAPI = {
     maximize: () => ipcRenderer.invoke(WINDOW_MAXIMIZE),
     close: () => ipcRenderer.invoke(WINDOW_CLOSE),
     isMaximized: () => ipcRenderer.invoke(WINDOW_IS_MAXIMIZED) as Promise<boolean>,
+    relaunch: () => ipcRenderer.invoke(APP_RELAUNCH),
   },
 
   onTodoChange: (callback: (event: IpcFileChangePayload) => void): (() => void) => {

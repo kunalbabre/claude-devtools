@@ -11,12 +11,23 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { api } from '@renderer/api';
 import { useStore } from '@renderer/store';
+import { formatModifierShortcut } from '@renderer/utils/keyboardUtils';
 import { createLogger } from '@shared/utils/logger';
 import { useShallow } from 'zustand/react/shallow';
 
 const logger = createLogger('Component:CommandPalette');
 import { formatDistanceToNow } from 'date-fns';
-import { Bot, FileText, FolderGit2, Loader2, MessageSquare, Search, User, X } from 'lucide-react';
+import {
+  Bot,
+  FileText,
+  FolderGit2,
+  Globe,
+  Loader2,
+  MessageSquare,
+  Search,
+  User,
+  X,
+} from 'lucide-react';
 
 import type { RepositoryGroup, SearchResult } from '@renderer/types/data';
 
@@ -83,6 +94,8 @@ interface SessionResultItemProps {
   isSelected: boolean;
   onClick: () => void;
   highlightMatch: (context: string, matchedText: string) => React.ReactNode;
+  showProjectName?: boolean;
+  projectName?: string;
 }
 
 const SessionResultItemInner = ({
@@ -90,6 +103,8 @@ const SessionResultItemInner = ({
   isSelected,
   onClick,
   highlightMatch,
+  showProjectName = false,
+  projectName,
 }: Readonly<SessionResultItemProps>): React.JSX.Element => {
   return (
     <button
@@ -107,6 +122,12 @@ const SessionResultItemInner = ({
           {result.messageType === 'user' ? <User className="size-4" /> : <Bot className="size-4" />}
         </div>
         <div className="min-w-0 flex-1">
+          {showProjectName && projectName && (
+            <div className="mb-1 flex items-center gap-2">
+              <FolderGit2 className="size-3 text-blue-400" />
+              <span className="truncate text-xs font-medium text-blue-400">{projectName}</span>
+            </div>
+          )}
           <div className="mb-1 flex items-center gap-2">
             <FileText className="size-3 text-text-muted" />
             <span className="truncate text-xs text-text-muted">
@@ -161,10 +182,11 @@ export const CommandPalette = (): React.JSX.Element | null => {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [totalMatches, setTotalMatches] = useState(0);
   const [searchIsPartial, setSearchIsPartial] = useState(false);
+  const [globalSearchEnabled, setGlobalSearchEnabled] = useState(false);
   const latestSearchRequestRef = useRef(0);
 
-  // Determine search mode based on whether a project is selected
-  const searchMode: SearchMode = selectedProjectId ? 'sessions' : 'projects';
+  // Determine search mode based on whether a project is selected OR global search is enabled
+  const searchMode: SearchMode = selectedProjectId || globalSearchEnabled ? 'sessions' : 'projects';
 
   // Filter projects for project search mode
   const filteredProjects = useMemo(() => {
@@ -188,10 +210,20 @@ export const CommandPalette = (): React.JSX.Element | null => {
 
   // Fetch repository groups if needed
   useEffect(() => {
-    if (commandPaletteOpen && searchMode === 'projects' && repositoryGroups.length === 0) {
+    if (
+      commandPaletteOpen &&
+      (searchMode === 'projects' || globalSearchEnabled) &&
+      repositoryGroups.length === 0
+    ) {
       void fetchRepositoryGroups();
     }
-  }, [commandPaletteOpen, searchMode, repositoryGroups.length, fetchRepositoryGroups]);
+  }, [
+    commandPaletteOpen,
+    searchMode,
+    globalSearchEnabled,
+    repositoryGroups.length,
+    fetchRepositoryGroups,
+  ]);
 
   // Focus input when palette opens
   useEffect(() => {
@@ -202,20 +234,22 @@ export const CommandPalette = (): React.JSX.Element | null => {
       setSelectedIndex(0);
       setTotalMatches(0);
       setSearchIsPartial(false);
+      setGlobalSearchEnabled(false);
     }
   }, [commandPaletteOpen]);
 
   // Search sessions with debounce (only in session mode)
   useEffect(() => {
-    if (
-      !commandPaletteOpen ||
-      searchMode !== 'sessions' ||
-      !selectedProjectId ||
-      query.trim().length < 2
-    ) {
+    // Only clear results when query is too short or palette is closed
+    if (!commandPaletteOpen || query.trim().length < 2) {
       setSessionResults([]);
       setTotalMatches(0);
       setSearchIsPartial(false);
+      return;
+    }
+
+    // Early return without clearing if we're not in the right mode
+    if (searchMode !== 'sessions' || (!globalSearchEnabled && !selectedProjectId)) {
       return;
     }
 
@@ -224,7 +258,9 @@ export const CommandPalette = (): React.JSX.Element | null => {
       latestSearchRequestRef.current = requestId;
       setLoading(true);
       try {
-        const searchResult = await api.searchSessions(selectedProjectId, query.trim(), 50);
+        const searchResult = globalSearchEnabled
+          ? await api.searchAllProjects(query.trim(), 50)
+          : await api.searchSessions(selectedProjectId!, query.trim(), 50);
         if (latestSearchRequestRef.current !== requestId) {
           return;
         }
@@ -245,10 +281,10 @@ export const CommandPalette = (): React.JSX.Element | null => {
           setLoading(false);
         }
       }
-    }, 200);
+    }, 400);
 
     return () => clearTimeout(timeoutId);
-  }, [query, selectedProjectId, commandPaletteOpen, searchMode]);
+  }, [query, selectedProjectId, commandPaletteOpen, searchMode, globalSearchEnabled]);
 
   // Reset selected index when results change
   useEffect(() => {
@@ -294,6 +330,12 @@ export const CommandPalette = (): React.JSX.Element | null => {
   // Handle keyboard navigation
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (e.key === 'g' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setGlobalSearchEnabled((prev) => !prev);
+        return;
+      }
+
       if (e.key === 'Escape') {
         e.preventDefault();
         closeCommandPalette();
@@ -383,23 +425,48 @@ export const CommandPalette = (): React.JSX.Element | null => {
       <div className="w-full max-w-2xl overflow-hidden rounded-xl border border-border bg-surface shadow-2xl">
         {/* Mode indicator */}
         <div className="bg-surface-raised/50 border-b border-border px-4 py-2">
-          <div className="flex items-center gap-2">
-            {searchMode === 'projects' ? (
-              <>
-                <FolderGit2 className="size-3.5 text-text-muted" />
-                <span className="text-xs text-text-muted">Search projects</span>
-              </>
-            ) : (
-              <>
-                <MessageSquare className="size-3.5 text-text-muted" />
-                <span className="text-xs text-text-muted">Search in projects</span>
-                <span className="text-text-muted/50 mx-1 text-xs">·</span>
-                <span className="truncate text-xs text-text-secondary">
-                  {repositoryGroups.find((r) => r.worktrees.some((w) => w.id === selectedProjectId))
-                    ?.name ?? 'Current project'}
-                </span>
-              </>
-            )}
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              {searchMode === 'projects' ? (
+                <>
+                  <FolderGit2 className="size-3.5 text-text-muted" />
+                  <span className="text-xs text-text-muted">Search projects</span>
+                </>
+              ) : (
+                <>
+                  <MessageSquare className="size-3.5 text-text-muted" />
+                  <span className="text-xs text-text-muted">
+                    {globalSearchEnabled ? 'Search across all projects' : 'Search in project'}
+                  </span>
+                  {!globalSearchEnabled && (
+                    <>
+                      <span className="text-text-muted/50 mx-1 text-xs">·</span>
+                      <span className="truncate text-xs text-text-secondary">
+                        {repositoryGroups.find((r) =>
+                          r.worktrees.some((w) => w.id === selectedProjectId)
+                        )?.name ?? 'Current project'}
+                      </span>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+            <button
+              onClick={() => setGlobalSearchEnabled(!globalSearchEnabled)}
+              className={`flex items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors ${
+                globalSearchEnabled
+                  ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30'
+                  : 'text-text-muted hover:bg-surface-raised hover:text-text'
+              }`}
+              title={
+                !globalSearchEnabled
+                  ? `Search across all projects (${formatModifierShortcut('G')})`
+                  : undefined
+              }
+            >
+              <Globe className="size-3" />
+              <span>Global</span>
+            </button>
           </div>
         </div>
 
@@ -459,15 +526,25 @@ export const CommandPalette = (): React.JSX.Element | null => {
             </div>
           ) : (
             <div className="py-2">
-              {sessionResults.map((result, index) => (
-                <SessionResultItem
-                  key={`${result.sessionId}-${index}`}
-                  result={result}
-                  isSelected={index === selectedIndex}
-                  onClick={() => handleSessionResultClick(result)}
-                  highlightMatch={highlightMatch}
-                />
-              ))}
+              {sessionResults.map((result, index) => {
+                // Find project name for this result when in global search mode
+                const projectName = globalSearchEnabled
+                  ? repositoryGroups.find((r) => r.worktrees.some((w) => w.id === result.projectId))
+                      ?.name
+                  : undefined;
+
+                return (
+                  <SessionResultItem
+                    key={`${result.sessionId}-${index}`}
+                    result={result}
+                    isSelected={index === selectedIndex}
+                    onClick={() => handleSessionResultClick(result)}
+                    highlightMatch={highlightMatch}
+                    showProjectName={globalSearchEnabled}
+                    projectName={projectName}
+                  />
+                );
+              })}
             </div>
           )}
         </div>
@@ -478,7 +555,7 @@ export const CommandPalette = (): React.JSX.Element | null => {
             {searchMode === 'projects'
               ? `${filteredProjects.length} project${filteredProjects.length !== 1 ? 's' : ''}`
               : totalMatches > 0
-                ? `${totalMatches} ${searchIsPartial ? 'fast ' : ''}result${totalMatches !== 1 ? 's' : ''}`
+                ? `${totalMatches} ${searchIsPartial ? 'fast ' : ''}result${totalMatches !== 1 ? 's' : ''}${globalSearchEnabled ? ' across all projects' : ''}`
                 : 'Type to search'}
           </span>
           <div className="flex items-center gap-4">
@@ -489,6 +566,12 @@ export const CommandPalette = (): React.JSX.Element | null => {
             <span>
               <kbd className="rounded bg-surface-overlay px-1.5 py-0.5 text-[10px]">↵</kbd>{' '}
               {searchMode === 'projects' ? 'select' : 'open'}
+            </span>
+            <span>
+              <kbd className="rounded bg-surface-overlay px-1.5 py-0.5 text-[10px]">
+                {formatModifierShortcut('G')}
+              </kbd>{' '}
+              global
             </span>
             <span>
               <kbd className="rounded bg-surface-overlay px-1.5 py-0.5 text-[10px]">esc</kbd> close

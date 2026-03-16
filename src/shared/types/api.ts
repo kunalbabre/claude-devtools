@@ -30,6 +30,15 @@ import type {
 } from '@main/types';
 
 // =============================================================================
+// Agent Config
+// =============================================================================
+
+export interface AgentConfig {
+  name: string;
+  color?: string;
+}
+
+// =============================================================================
 // Notifications API
 // =============================================================================
 
@@ -347,6 +356,7 @@ export interface ElectronAPI {
     query: string,
     maxResults?: number
   ) => Promise<SearchSessionsResult>;
+  searchAllProjects: (query: string, maxResults?: number) => Promise<SearchSessionsResult>;
   getSessionDetail: (projectId: string, sessionId: string) => Promise<SessionDetail | null>;
   getSessionMetrics: (projectId: string, sessionId: string) => Promise<SessionMetrics | null>;
   getWaterfallData: (projectId: string, sessionId: string) => Promise<WaterfallData | null>;
@@ -385,6 +395,9 @@ export interface ElectronAPI {
     maxTokens?: number
   ) => Promise<ClaudeMdFileInfo | null>;
 
+  // Agent config reading
+  readAgentConfigs: (projectRoot: string) => Promise<Record<string, AgentConfig>>;
+
   // Notifications API
   notifications: NotificationsAPI;
 
@@ -402,6 +415,9 @@ export interface ElectronAPI {
   onFileChange: (callback: (event: FileChangeEvent) => void) => () => void;
   onTodoChange: (callback: (event: FileChangeEvent) => void) => () => void;
 
+  // Session refresh (Ctrl+R / Cmd+R intercepted by main process)
+  onSessionRefresh: (callback: () => void) => () => void;
+
   // Shell operations
   openPath: (
     targetPath: string,
@@ -415,6 +431,7 @@ export interface ElectronAPI {
     maximize: () => Promise<void>;
     close: () => Promise<void>;
     isMaximized: () => Promise<boolean>;
+    relaunch: () => Promise<void>;
   };
 
   // Updater API

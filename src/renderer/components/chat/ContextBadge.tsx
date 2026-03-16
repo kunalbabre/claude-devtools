@@ -215,6 +215,17 @@ export const ContextBadge = ({
     [newTaskCoordinationInjections]
   );
 
+  // Compute actual item counts (not injection-object counts) for accurate badge display
+  const toolOutputCount = useMemo(
+    () => newToolOutputInjections.reduce((sum, inj) => sum + inj.toolCount, 0),
+    [newToolOutputInjections]
+  );
+
+  const taskCoordinationCount = useMemo(
+    () => newTaskCoordinationInjections.reduce((sum, inj) => sum + inj.breakdown.length, 0),
+    [newTaskCoordinationInjections]
+  );
+
   const userMessageTokens = useMemo(
     () => newUserMessageInjections.reduce((sum, inj) => sum + inj.estimatedTokens, 0),
     [newUserMessageInjections]
@@ -478,7 +489,7 @@ export const ContextBadge = ({
               {newToolOutputInjections.length > 0 && (
                 <PopoverSection
                   title="Tool Outputs"
-                  count={newToolOutputInjections.length}
+                  count={toolOutputCount}
                   tokenCount={toolOutputTokens}
                 >
                   {newToolOutputInjections.map((injection) =>
@@ -501,7 +512,7 @@ export const ContextBadge = ({
               {newTaskCoordinationInjections.length > 0 && (
                 <PopoverSection
                   title="Task Coordination"
-                  count={newTaskCoordinationInjections.length}
+                  count={taskCoordinationCount}
                   tokenCount={taskCoordinationTokens}
                 >
                   {newTaskCoordinationInjections.map((injection) =>

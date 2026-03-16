@@ -31,6 +31,7 @@ export function initializeSearchHandlers(contextRegistry: ServiceContextRegistry
  */
 export function registerSearchHandlers(ipcMain: IpcMain): void {
   ipcMain.handle('search-sessions', handleSearchSessions);
+  ipcMain.handle('search-all-projects', handleSearchAllProjects);
 
   logger.info('Search handlers registered');
 }
@@ -40,6 +41,7 @@ export function registerSearchHandlers(ipcMain: IpcMain): void {
  */
 export function removeSearchHandlers(ipcMain: IpcMain): void {
   ipcMain.removeHandler('search-sessions');
+  ipcMain.removeHandler('search-all-projects');
 
   logger.info('Search handlers removed');
 }
@@ -78,6 +80,32 @@ async function handleSearchSessions(
     return result;
   } catch (error) {
     logger.error(`Error in search-sessions for project ${projectId}:`, error);
+    return { results: [], totalMatches: 0, sessionsSearched: 0, query };
+  }
+}
+
+/**
+ * Handler for 'search-all-projects' IPC call.
+ * Searches sessions across all projects for a query string.
+ */
+async function handleSearchAllProjects(
+  _event: IpcMainInvokeEvent,
+  query: string,
+  maxResults?: number
+): Promise<SearchSessionsResult> {
+  try {
+    const validatedQuery = validateSearchQuery(query);
+    if (!validatedQuery.valid) {
+      logger.error(`search-all-projects rejected: ${validatedQuery.error ?? 'Invalid query'}`);
+      return { results: [], totalMatches: 0, sessionsSearched: 0, query };
+    }
+
+    const { projectScanner } = registry.getActive();
+    const safeMaxResults = coerceSearchMaxResults(maxResults, 50);
+    const result = await projectScanner.searchAllProjects(validatedQuery.value!, safeMaxResults);
+    return result;
+  } catch (error) {
+    logger.error('Error in search-all-projects:', error);
     return { results: [], totalMatches: 0, sessionsSearched: 0, query };
   }
 }

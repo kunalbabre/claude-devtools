@@ -60,6 +60,9 @@ import type { FileSystemProvider, FsDirent } from '../infrastructure/FileSystemP
 
 const logger = createLogger('Discovery:ProjectScanner');
 
+/** How long to reuse the cached project list for search (ms) */
+const SEARCH_PROJECT_CACHE_TTL_MS = 30_000;
+
 export class ProjectScanner {
   private readonly projectsDir: string;
   private readonly todosDir: string;
@@ -80,6 +83,9 @@ export class ProjectScanner {
     string,
     { mtimeMs: number; size: number; preview: { text: string; timestamp: string } | null }
   >();
+
+  /** Cached project list for search — avoids re-scanning disk on every query */
+  private searchProjectCache: { projects: Project[]; timestamp: number } | null = null;
 
   // Delegated services
   private readonly fsProvider: FileSystemProvider;
@@ -354,8 +360,11 @@ export class ProjectScanner {
         cwdGroups.set(key, group);
       }
 
-      // If only 1 unique cwd, return single project (current behavior)
-      if (cwdGroups.size <= 1) {
+      // If only 1 unique real cwd, return single project (current behavior)
+      // Sessions without cwd (older format) are implicitly from the same project,
+      // so we only count distinct real cwds to decide whether to split.
+      const realCwdKeys = [...cwdGroups.keys()].filter((k) => !k.startsWith('__decoded__'));
+      if (realCwdKeys.length <= 1) {
         const allSessionIds = sessionInfos.map((s) => s.sessionId);
         let mostRecentSession: number | undefined;
         let createdAt = Date.now();
@@ -513,7 +522,7 @@ export class ProjectScanner {
       // This prevents the mismatch where dashboard shows N sessions but clicking shows 0
       // because all sessions are filtered as noise (e.g., sessions with only system commands).
       const shouldFilterNoise = process.env.CLAUDE_DEVTOOLS_STRICT_SESSION_FILTER === '1';
-      const metadataLevel: SessionMetadataLevel = this.fsProvider.type === 'ssh' ? 'light' : 'deep';
+      const metadataLevel: SessionMetadataLevel = 'light';
       const applyNoiseFilter = shouldFilterNoise;
 
       if (!(await this.fsProvider.exists(projectPath))) {
@@ -613,12 +622,12 @@ export class ProjectScanner {
       const prefilterAll = options?.prefilterAll ?? false;
       const projectPath = this.resolveProjectDir(projectId);
       const sessionFilter = await this.getSessionFilterForProject(projectId);
+      const metadataLevel: SessionMetadataLevel =
+        options?.metadataLevel ?? (this.fsProvider.type === 'ssh' ? 'light' : 'deep');
       // Align noise filtering with WorktreeGrouper (dashboard): disabled by default.
       // This prevents the mismatch where dashboard shows N sessions but clicking shows 0
       // because all sessions are filtered as noise (e.g., sessions with only system commands).
       const shouldFilterNoise = process.env.CLAUDE_DEVTOOLS_STRICT_SESSION_FILTER === '1';
-      const metadataLevel: SessionMetadataLevel =
-        options?.metadataLevel ?? (this.fsProvider.type === 'ssh' ? 'light' : 'deep');
       const applyNoiseFilterPaginated = shouldFilterNoise;
 
       if (!(await this.fsProvider.exists(projectPath))) {
@@ -892,6 +901,12 @@ export class ProjectScanner {
         ? firstMessageTimestampMs
         : birthtimeMs;
 
+    // If messages suggest ongoing but the file hasn't been written to in 5+ minutes,
+    // the session likely crashed/was killed — mark as dead (issue #94)
+    const STALE_SESSION_THRESHOLD_MS = 5 * 60 * 1000;
+    const isOngoing =
+      metadata.isOngoing && Date.now() - effectiveMtime < STALE_SESSION_THRESHOLD_MS;
+
     return {
       id: sessionId,
       projectId,
@@ -902,7 +917,7 @@ export class ProjectScanner {
       messageTimestamp: metadata.firstUserMessage?.timestamp,
       hasSubagents,
       messageCount: metadata.messageCount,
-      isOngoing: metadata.isOngoing,
+      isOngoing,
       gitBranch: metadata.gitBranch ?? undefined,
       metadataLevel,
       contextConsumption: metadata.contextConsumption,
@@ -1218,15 +1233,6 @@ export class ProjectScanner {
   }
 
   /**
-   * Checks if a session has subagent files (session-specific only).
-   * Only checks the NEW structure: {projectId}/{sessionId}/subagents/
-   * Verifies that at least one subagent file has non-empty content.
-   */
-  hasSubagentsSync(projectId: string, sessionId: string): boolean {
-    return this.subagentLocator.hasSubagentsSync(projectId, sessionId);
-  }
-
-  /**
    * Lists all subagent files for a session from both NEW and OLD structures.
    * Returns NEW structure files first, then OLD structure files.
    */
@@ -1284,6 +1290,83 @@ export class ProjectScanner {
     maxResults: number = 50
   ): Promise<SearchSessionsResult> {
     return this.sessionSearcher.searchSessions(projectId, query, maxResults);
+  }
+
+  /**
+   * Searches sessions across all projects for a query string.
+   * Filters out noise messages and returns matching content.
+   *
+   * @param query - Search query string
+   * @param maxResults - Maximum number of results to return (default 50)
+   */
+  async searchAllProjects(query: string, maxResults: number = 50): Promise<SearchSessionsResult> {
+    const startedAt = Date.now();
+    try {
+      if (!query || query.trim().length === 0) {
+        return { results: [], totalMatches: 0, sessionsSearched: 0, query };
+      }
+
+      // Use cached project list to avoid re-scanning disk on every keystroke
+      let projects: Project[];
+      if (
+        this.searchProjectCache &&
+        Date.now() - this.searchProjectCache.timestamp < SEARCH_PROJECT_CACHE_TTL_MS
+      ) {
+        projects = this.searchProjectCache.projects;
+      } else {
+        projects = await this.scan();
+        this.searchProjectCache = { projects, timestamp: Date.now() };
+      }
+
+      if (projects.length === 0) {
+        return { results: [], totalMatches: 0, sessionsSearched: 0, query };
+      }
+
+      // Search across all projects with bounded concurrency
+      const allResults: SearchSessionsResult[] = [];
+      const searchBatchSize = this.fsProvider.type === 'ssh' ? 2 : 8;
+
+      for (let i = 0; i < projects.length; i += searchBatchSize) {
+        const batch = projects.slice(i, i + searchBatchSize);
+        const batchResults = await Promise.allSettled(
+          batch.map((project) => this.sessionSearcher.searchSessions(project.id, query, maxResults))
+        );
+
+        for (const result of batchResults) {
+          if (result.status === 'fulfilled') {
+            allResults.push(result.value);
+          }
+        }
+
+        // Check if we have enough results already
+        const totalMatches = allResults.reduce((sum, r) => sum + r.totalMatches, 0);
+        if (totalMatches >= maxResults) {
+          break;
+        }
+      }
+
+      // Merge results from all projects
+      const mergedResults = allResults.flatMap((r) => r.results);
+      const totalSessionsSearched = allResults.reduce((sum, r) => sum + r.sessionsSearched, 0);
+
+      // Sort by timestamp (most recent first) and limit to maxResults
+      mergedResults.sort((a, b) => b.timestamp - a.timestamp);
+      const limitedResults = mergedResults.slice(0, maxResults);
+
+      logger.debug(
+        `Global search completed: ${limitedResults.length} results from ${totalSessionsSearched} sessions across ${projects.length} projects in ${Date.now() - startedAt}ms`
+      );
+
+      return {
+        results: limitedResults,
+        totalMatches: limitedResults.length,
+        sessionsSearched: totalSessionsSearched,
+        query,
+      };
+    } catch (error) {
+      logger.error('Error searching all projects:', error);
+      return { results: [], totalMatches: 0, sessionsSearched: 0, query };
+    }
   }
 
   /**
